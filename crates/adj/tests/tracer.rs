@@ -2,6 +2,8 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use nix::sys::signal::kill;
+use nix::unistd::Pid;
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -98,9 +100,17 @@ async fn tracer_add_up_logs_down() {
     let mut sandbox = Sandbox::new().await;
     sandbox.start_daemon().await;
 
-    // App that prints a marker then sleeps long enough for the test to drive it.
+    // App that prints a marker, then backgrounds a sleep and records its PID. We need a real
+    // descendant PID (not the shell's PID) to probe whether `adj down` reached the full
+    // process group — without the process-group fix, signals hit only `sh` and the sleep
+    // gets reparented to init.
     let app_dir = TempDir::new().expect("app dir");
-    write_app(app_dir.path(), "demo", "echo hello-from-demo; sleep 60").await;
+    let descendant_pid_file = app_dir.path().join("descendant.pid");
+    let cmd = format!(
+        "echo hello-from-demo; sleep 60 & echo $! > {}; wait",
+        descendant_pid_file.display()
+    );
+    write_app(app_dir.path(), "demo", &cmd).await;
 
     let add = sandbox
         .cmd()
@@ -204,6 +214,21 @@ async fn tracer_add_up_logs_down() {
     let _ = tail_child.start_kill();
     let _ = tail_child.wait().await;
 
+    // Capture the descendant PID *before* we tear the app down — without the process-group
+    // fix, this PID survives `adj down` (orphaned to init) even though the supervisor
+    // reports the app stopped.
+    wait_for(
+        || descendant_pid_file.exists(),
+        "descendant.pid to appear",
+        Duration::from_secs(5),
+    )
+    .await;
+    let descendant_pid: i32 = std::fs::read_to_string(&descendant_pid_file)
+        .expect("read descendant pid")
+        .trim()
+        .parse()
+        .expect("parse descendant pid");
+
     let down = sandbox
         .cmd()
         .arg("down")
@@ -217,8 +242,8 @@ async fn tracer_add_up_logs_down() {
         String::from_utf8_lossy(&down.stderr)
     );
 
-    // After down, state should not be running. Could be stopped (clean exit on SIGTERM)
-    // or crashed (sh propagates the signal as an exit code). Both are acceptable here.
+    // After `down`, status must report `stopped` — the daemon distinguishes intentional
+    // termination from a crash.
     let status = sandbox
         .cmd()
         .arg("status")
@@ -228,8 +253,26 @@ async fn tracer_add_up_logs_down() {
         .expect("status");
     let status_out = String::from_utf8_lossy(&status.stdout);
     assert!(
-        !status_out.contains("running"),
-        "status still reports running after down: {status_out}"
+        status_out.contains("stopped"),
+        "expected status `stopped` after down, got: {status_out}"
+    );
+
+    // The descendant `sleep` must actually be gone — `kill(pid, 0)` should fail with ESRCH.
+    // Poll briefly to give the kernel a beat to reap it.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut gone = false;
+    while Instant::now() < deadline {
+        match kill(Pid::from_raw(descendant_pid), None) {
+            Err(nix::errno::Errno::ESRCH) => {
+                gone = true;
+                break;
+            }
+            _ => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    }
+    assert!(
+        gone,
+        "descendant PID {descendant_pid} still alive after down — process-group signal leaked"
     );
 
     sandbox.stop_daemon().await;
@@ -247,6 +290,49 @@ async fn commands_fail_cleanly_without_daemon() {
     );
     // No panic markers in stderr.
     assert!(!stderr.contains("panicked"), "panic in stderr: {stderr}");
+}
+
+#[tokio::test]
+async fn add_resolves_relative_path_against_client_cwd() {
+    // Regression: canonicalize used to happen on the daemon side, which resolves relative
+    // paths against the daemon's CWD (the launchd home, in production). The client must
+    // canonicalize before sending so `adj add ./child` resolves against the user's CWD.
+    let mut sandbox = Sandbox::new().await;
+    sandbox.start_daemon().await;
+
+    let parent = TempDir::new().expect("parent dir");
+    let child_dir = parent.path().join("child");
+    std::fs::create_dir(&child_dir).expect("mkdir child");
+    write_app(&child_dir, "rel-demo", "echo hi; sleep 30").await;
+
+    // Spawn `adj add ./child` with CWD set to the parent directory. The daemon is rooted
+    // elsewhere, so a daemon-side canonicalize would either fail or land on the wrong path.
+    let add = sandbox
+        .cmd()
+        .current_dir(parent.path())
+        .arg("add")
+        .arg("./child")
+        .output()
+        .await
+        .expect("add");
+    assert!(
+        add.status.success(),
+        "relative-path add failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&add.stdout),
+        String::from_utf8_lossy(&add.stderr)
+    );
+
+    let registry = sandbox.home_path.join("registry.toml");
+    let raw = std::fs::read_to_string(&registry).expect("read registry");
+    let expected = std::fs::canonicalize(&child_dir).expect("canonical child");
+    assert!(
+        raw.contains(&expected.display().to_string()),
+        "registry missing canonical child path. expected substring `{}`, got:\n{}",
+        expected.display(),
+        raw
+    );
+
+    sandbox.stop_daemon().await;
 }
 
 #[tokio::test]
