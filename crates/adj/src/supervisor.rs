@@ -29,6 +29,10 @@ struct Inner {
 
 struct AppRuntime {
     state: AppState,
+    // Set when the daemon initiates termination (down, restart's down half). On exit, this
+    // means the process should be recorded as Stopped rather than Crashed even if the shell
+    // propagates the signal as a non-zero exit code.
+    intentional_stop: bool,
 }
 
 impl Supervisor {
@@ -65,13 +69,19 @@ impl Supervisor {
             .try_clone()
             .context("cloning log file handle for stderr")?;
 
-        let mut child = Command::new("sh")
+        let mut command = Command::new("sh");
+        command
             .arg("-c")
             .arg(&cfg.cmd)
             .current_dir(&app_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::from(log_file))
-            .stderr(Stdio::from(stderr_file))
+            .stderr(Stdio::from(stderr_file));
+        // Put the shell and everything it spawns in its own process group so we can signal
+        // the whole tree on stop. Without this, SIGTERM/SIGKILL hit only `sh` and the real
+        // long-running command (e.g. a dev server) is reparented to init and keeps the port.
+        command.process_group(0);
+        let mut child = command
             .spawn()
             .with_context(|| format!("spawning `{}`", cfg.cmd))?;
 
@@ -83,6 +93,7 @@ impl Supervisor {
             name.clone(),
             AppRuntime {
                 state: AppState::Running { pid },
+                intentional_stop: false,
             },
         );
         // Detach the wait task so the supervisor can observe exit/crash without holding the lock.
@@ -92,6 +103,7 @@ impl Supervisor {
             let status = child.wait().await;
             let mut guard = inner_handle.lock().await;
             if let Some(rt) = guard.apps.get_mut(&watch_name) {
+                let intentional = rt.intentional_stop;
                 match status {
                     Ok(s) => {
                         let code = s.code().unwrap_or_else(|| {
@@ -106,16 +118,22 @@ impl Supervisor {
                                 -1
                             }
                         });
-                        rt.state = if code == 0 {
+                        rt.state = if intentional || code == 0 {
                             AppState::Stopped
                         } else {
                             AppState::Crashed { exit_code: code }
                         };
                     }
                     Err(_) => {
-                        rt.state = AppState::Crashed { exit_code: -1 };
+                        rt.state = if intentional {
+                            AppState::Stopped
+                        } else {
+                            AppState::Crashed { exit_code: -1 }
+                        };
                     }
                 }
+                // Reset the flag so a subsequent crash (no `down`) reports Crashed correctly.
+                rt.intentional_stop = false;
             }
         });
 
@@ -124,15 +142,25 @@ impl Supervisor {
 
     pub async fn down(&self, name: &str) -> Result<()> {
         let pid = {
-            let inner = self.inner.lock().await;
-            match inner.apps.get(name).map(|rt| rt.state.clone()) {
-                Some(AppState::Running { pid }) => pid,
+            let mut inner = self.inner.lock().await;
+            let rt = inner
+                .apps
+                .get_mut(name)
+                .ok_or_else(|| anyhow!("app `{}` is not running", name))?;
+            let pid = match rt.state {
+                AppState::Running { pid } => pid,
                 _ => return Err(anyhow!("app `{}` is not running", name)),
-            }
+            };
+            // Flag the upcoming exit as intentional so the wait task records Stopped, not Crashed.
+            rt.intentional_stop = true;
+            pid
         };
 
-        let nix_pid = Pid::from_raw(pid as i32);
-        let _ = kill(nix_pid, Signal::SIGTERM);
+        // Signal the whole process group (negative PID). The supervised PID is the shell's PID
+        // which we made the process-group leader via .process_group(0), so -pid reaches every
+        // descendant including the real dev server.
+        let pgid = Pid::from_raw(-(pid as i32));
+        let _ = kill(pgid, Signal::SIGTERM);
 
         let deadline = tokio::time::Instant::now() + TERM_GRACE;
         loop {
@@ -147,7 +175,7 @@ impl Supervisor {
                 break;
             }
         }
-        let _ = kill(nix_pid, Signal::SIGKILL);
+        let _ = kill(pgid, Signal::SIGKILL);
         // wait briefly for the watcher to flip state
         for _ in 0..50 {
             sleep(Duration::from_millis(100)).await;
