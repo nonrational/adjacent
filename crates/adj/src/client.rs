@@ -47,7 +47,16 @@ fn into_error(resp: Response) -> Result<Response> {
 }
 
 pub async fn add(path: String) -> Result<()> {
-    let resp = into_error(request(Request::Add { path }).await?)?;
+    // Canonicalize on the client side: relative paths must resolve against the user's CWD,
+    // not the daemon's. The daemon may have been launched from anywhere (or by launchd).
+    let canon = std::fs::canonicalize(&path)
+        .with_context(|| format!("resolving path {}", path))?;
+    let resp = into_error(
+        request(Request::Add {
+            path: canon.display().to_string(),
+        })
+        .await?,
+    )?;
     if let Response::Added { name, path } = resp {
         println!("registered `{name}` at {path}");
     }

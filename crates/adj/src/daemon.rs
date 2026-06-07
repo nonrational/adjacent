@@ -5,6 +5,7 @@ use adj_protocol::{AppSummary, Request, Response};
 use anyhow::{anyhow, Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Mutex;
 
 use crate::paths;
 use crate::registry::{self, Registry};
@@ -35,6 +36,7 @@ pub async fn run() -> Result<()> {
     tracing::info!("adj daemon listening at {}", socket.display());
 
     let supervisor = Arc::new(Supervisor::new());
+    let registry_lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
 
     // Best-effort cleanup of the socket on Ctrl-C so subsequent boots aren't blocked.
     let socket_for_signal = socket.clone();
@@ -54,8 +56,9 @@ pub async fn run() -> Result<()> {
             }
         };
         let sup = supervisor.clone();
+        let reg_lock = registry_lock.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle_client(stream, sup).await {
+            if let Err(err) = handle_client(stream, sup, reg_lock).await {
                 tracing::warn!("client handler error: {err}");
             }
         });
@@ -80,7 +83,11 @@ async fn probe_existing_daemon(socket: &PathBuf) -> bool {
     }
 }
 
-async fn handle_client(stream: UnixStream, supervisor: Arc<Supervisor>) -> Result<()> {
+async fn handle_client(
+    stream: UnixStream,
+    supervisor: Arc<Supervisor>,
+    registry_lock: Arc<Mutex<()>>,
+) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
@@ -99,7 +106,7 @@ async fn handle_client(stream: UnixStream, supervisor: Arc<Supervisor>) -> Resul
         }
     };
 
-    let response = match dispatch(req, supervisor).await {
+    let response = match dispatch(req, supervisor, registry_lock).await {
         Ok(r) => r,
         Err(err) => Response::Error {
             message: format!("{err}"),
@@ -120,10 +127,14 @@ async fn send_response(
     Ok(())
 }
 
-async fn dispatch(req: Request, supervisor: Arc<Supervisor>) -> Result<Response> {
+async fn dispatch(
+    req: Request,
+    supervisor: Arc<Supervisor>,
+    registry_lock: Arc<Mutex<()>>,
+) -> Result<Response> {
     match req {
         Request::Ping => Ok(Response::Ok),
-        Request::Add { path } => add(path).await,
+        Request::Add { path } => add(path, registry_lock).await,
         Request::List => list(supervisor).await,
         Request::Up { name } => up(name, supervisor).await,
         Request::Down { name } => down(name, supervisor).await,
@@ -133,9 +144,21 @@ async fn dispatch(req: Request, supervisor: Arc<Supervisor>) -> Result<Response>
     }
 }
 
-async fn add(path: String) -> Result<Response> {
-    let canon = std::fs::canonicalize(&path).with_context(|| format!("resolving path {}", path))?;
+async fn add(path: String, registry_lock: Arc<Mutex<()>>) -> Result<Response> {
+    // The client canonicalizes against the user's CWD before sending. We require absolute
+    // paths here so we never silently resolve against the daemon's CWD.
+    let candidate = PathBuf::from(&path);
+    if !candidate.is_absolute() {
+        return Err(anyhow!(
+            "expected absolute path, got `{}` (client should canonicalize before send)",
+            path
+        ));
+    }
+    let canon = std::fs::canonicalize(&candidate)
+        .with_context(|| format!("resolving path {}", path))?;
     let cfg = registry::read_app_config(&canon)?;
+    // Serialize add operations so two concurrent calls can't both pass uniqueness and race on save.
+    let _guard = registry_lock.lock().await;
     let mut reg = Registry::load()?;
     if reg.get(&cfg.name).is_some() {
         return Err(anyhow!("an app named `{}` is already registered", cfg.name));
