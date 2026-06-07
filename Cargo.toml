@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/adj",
+    "crates/adj-protocol",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/nonrational/adjacent"
+
+[workspace.dependencies]
+adj-protocol = { path = "crates/adj-protocol" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tokio = { version = "1", features = ["full"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs = "5"
+nix = { version = "0.29", features = ["signal", "process"] }
+tempfile = "3"
