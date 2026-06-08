@@ -151,11 +151,15 @@ async fn print_file(path: &Path) -> Result<()> {
 }
 
 async fn tail_file(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
     let mut file = File::open(path)
         .await
         .with_context(|| format!("opening {}", path.display()))?;
+    let mut current_inode = file.metadata().await.ok().map(|m| m.ino());
     let mut stdout = tokio::io::stdout();
     let mut buf = vec![0u8; 8192];
+    // Drain the existing contents first so a non-tail-style "show then follow" feels normal.
     loop {
         let n = file.read(&mut buf).await?;
         if n == 0 {
@@ -166,10 +170,34 @@ async fn tail_file(path: &Path) -> Result<()> {
     stdout.flush().await?;
 
     // Poll for new content. Simple and dependency-free; sufficient for v1.
+    //
+    // Rotation detection: the supervisor renames <name>.log -> <name>.log.1 and creates a
+    // fresh <name>.log. Our open handle still points to the renamed inode and would never
+    // see new writes again. Each idle tick we re-stat the path; if its inode no longer
+    // matches the one we opened, we drain the old handle to EOF (post-rotation tail of
+    // the rotated file) and switch to the new file from offset 0.
     loop {
         let n = file.read(&mut buf).await?;
         if n == 0 {
             tokio::time::sleep(Duration::from_millis(200)).await;
+            if let Ok(meta) = tokio::fs::metadata(path).await {
+                let new_inode = Some(meta.ino());
+                if new_inode != current_inode {
+                    // Drain anything still buffered on the old inode before switching, so we
+                    // don't drop the tail of the just-rotated file.
+                    loop {
+                        let m = file.read(&mut buf).await?;
+                        if m == 0 {
+                            break;
+                        }
+                        stdout.write_all(&buf[..m]).await?;
+                    }
+                    file = File::open(path)
+                        .await
+                        .with_context(|| format!("re-opening {}", path.display()))?;
+                    current_inode = new_inode;
+                }
+            }
             continue;
         }
         stdout.write_all(&buf[..n]).await?;
