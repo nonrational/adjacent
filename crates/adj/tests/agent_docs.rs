@@ -69,3 +69,27 @@ async fn emits_markdown_templated_with_app_name_and_cmd() {
         "stdout contains un-substituted placeholder: {stdout}"
     );
 }
+
+#[tokio::test]
+async fn errors_when_manifest_missing() {
+    let dir = TempDir::new().expect("tempdir");
+    // Intentionally do NOT write adjacent.toml.
+
+    let out = Command::new(adj_bin())
+        .arg("agent-instructions")
+        .arg("--path")
+        .arg(dir.path())
+        .output()
+        .await
+        .expect("agent-instructions");
+
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit when adjacent.toml is missing"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no adjacent.toml found"),
+        "stderr should explain the missing manifest, got: {stderr}"
+    );
+}
