@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::proxy::proxy_port;
+use crate::proxy::{https_port, proxy_port};
 
 /// Anchor name registered with pfctl. Lowercased + dotless for readability in `pfctl -s nat`.
 const ANCHOR_NAME: &str = "adjacent";
@@ -8,14 +8,16 @@ const ANCHOR_NAME: &str = "adjacent";
 /// Print the pf anchor content and the exact sudo invocation that installs it. The daemon never
 /// escalates: the user reviews and runs the printed commands themselves.
 pub fn install() -> Result<()> {
-    let port = proxy_port();
+    let http = proxy_port();
+    let https = https_port();
     let anchor_path = format!("/etc/pf.anchors/{ANCHOR_NAME}");
-    let anchor_body = anchor_rule(port);
+    let anchor_body = anchor_rules(http, https);
 
     println!("# Adjacent port-forward installer");
     println!("#");
-    println!("# Adjacent listens on :{port} (high port, unprivileged). To make :80 reach it,");
-    println!("# install a pf NAT rule. Adjacent never escalates — review and run these manually.");
+    println!("# Adjacent listens on :{http} (HTTP) and :{https} (HTTPS) — both high, unprivileged");
+    println!("# ports. To make :80/:443 reach them, install a pf NAT rule. Adjacent never escalates");
+    println!("# — review and run these manually.");
     println!();
     println!("# 1. Anchor file ({anchor_path}):");
     println!("# ---8<--- begin anchor ---8<---");
@@ -33,8 +35,11 @@ pub fn install() -> Result<()> {
     Ok(())
 }
 
-fn anchor_rule(proxy_port: u16) -> String {
-    format!("rdr pass on lo0 inet proto tcp from any to any port 80 -> 127.0.0.1 port {proxy_port}\n")
+fn anchor_rules(http_port: u16, https_port: u16) -> String {
+    format!(
+        "rdr pass on lo0 inet proto tcp from any to any port 80 -> 127.0.0.1 port {http_port}\n\
+         rdr pass on lo0 inet proto tcp from any to any port 443 -> 127.0.0.1 port {https_port}\n"
+    )
 }
 
 #[cfg(test)]
@@ -42,10 +47,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn anchor_rule_targets_loopback_and_port() {
-        let rule = anchor_rule(8080);
-        assert!(rule.contains("port 80"));
-        assert!(rule.contains("127.0.0.1 port 8080"));
-        assert!(rule.contains("rdr"));
+    fn anchor_rules_target_loopback_and_both_ports() {
+        let rules = anchor_rules(8080, 8443);
+        assert!(rules.contains("port 80"));
+        assert!(rules.contains("port 443"));
+        assert!(rules.contains("127.0.0.1 port 8080"));
+        assert!(rules.contains("127.0.0.1 port 8443"));
+        assert_eq!(rules.matches("rdr").count(), 2);
     }
 }

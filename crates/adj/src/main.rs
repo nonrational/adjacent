@@ -5,12 +5,14 @@ use clap::{Parser, Subcommand};
 mod client;
 mod daemon;
 mod env;
+mod installca;
 mod paths;
 mod portforward;
 mod proxy;
 mod readiness;
 mod registry;
 mod supervisor;
+mod tls;
 
 #[derive(Parser)]
 #[command(
@@ -68,6 +70,8 @@ enum Cmd {
     },
     /// Print the pf anchor and the sudo command to redirect :80 to the proxy port.
     InstallPortForward,
+    /// Generate the local HTTPS CA (if missing) and print the sudo command to trust it.
+    InstallCa,
 }
 
 #[tokio::main]
@@ -85,6 +89,7 @@ async fn main() -> ExitCode {
         Cmd::Logs { name, tail, json } => client::logs(name, tail, json).await,
         Cmd::WaitReady { name, timeout } => client::wait_ready(name, timeout).await,
         Cmd::InstallPortForward => portforward::install(),
+        Cmd::InstallCa => installca::install(),
     };
 
     match result {
