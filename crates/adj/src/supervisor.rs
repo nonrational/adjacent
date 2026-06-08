@@ -1,14 +1,17 @@
 use std::collections::{HashMap, HashSet};
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use adj_protocol::AppState;
+use adj_protocol::{AppState, LogRecord, LogStream};
 use anyhow::{anyhow, Context, Result};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
@@ -73,14 +76,9 @@ impl Supervisor {
 
         let log_path = paths::log_path(&name)?;
         paths::ensure_dirs()?;
-        let log_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .with_context(|| format!("opening log file {}", log_path.display()))?;
-        let stderr_file = log_file
-            .try_clone()
-            .context("cloning log file handle for stderr")?;
+        // We pipe stdout/stderr and re-emit each line as a JSONL record so `adj logs --json`
+        // can recover per-line stream tags and timestamps. Plain-text `adj logs` just projects
+        // the `line` field. Two file handles are not needed — the writer task owns the file.
 
         let port_env = cfg.port_env.as_deref().unwrap_or("PORT");
         let mut command = Command::new("sh");
@@ -90,8 +88,8 @@ impl Supervisor {
             .current_dir(&app_dir)
             .env(port_env, port.to_string())
             .stdin(Stdio::null())
-            .stdout(Stdio::from(log_file))
-            .stderr(Stdio::from(stderr_file));
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         // Put the shell and everything it spawns in its own process group so we can signal
         // the whole tree on stop. Without this, SIGTERM/SIGKILL hit only `sh` and the real
         // long-running command (e.g. a dev server) is reparented to init and keeps the port.
@@ -117,10 +115,33 @@ impl Supervisor {
             }
         };
 
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        // Spawn the log-writer task before we record state so the file exists by the time the
+        // first byte is read — `--tail` on a brand-new app would otherwise race the file open.
+        let log_writer = LogWriter::open(&log_path).await.with_context(|| {
+            format!("opening log file {} for tagged writing", log_path.display())
+        })?;
+        let writer_handle = log_writer.handle();
+        spawn_log_reader(stdout, LogStream::Stdout, writer_handle.clone());
+        spawn_log_reader(stderr, LogStream::Stderr, writer_handle.clone());
+
+        let started_at = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| String::new());
+
         inner.apps.insert(
             name.clone(),
             AppRuntime {
-                state: AppState::Running { pid, port },
+                state: AppState::Running {
+                    pid,
+                    port,
+                    started_at: if started_at.is_empty() {
+                        None
+                    } else {
+                        Some(started_at)
+                    },
+                },
                 intentional_stop: false,
             },
         );
@@ -129,6 +150,10 @@ impl Supervisor {
         let watch_name = name.clone();
         tokio::spawn(async move {
             let status = child.wait().await;
+            // Drop the writer once the child is gone so the JSONL file flushes cleanly. Reader
+            // tasks finish on EOF; this handle goes out of scope here.
+            drop(writer_handle);
+            drop(log_writer);
             let mut guard = inner_handle.lock().await;
             if let Some(rt) = guard.apps.get_mut(&watch_name) {
                 let intentional = rt.intentional_stop;
@@ -221,6 +246,85 @@ impl Supervisor {
             name
         ))
     }
+}
+
+// LogWriter serializes appends to the JSONL log file from multiple reader tasks (one per
+// stream). It owns a tokio mutex around the file handle; readers send fully-formed records.
+struct LogWriter {
+    file: Arc<Mutex<tokio::fs::File>>,
+}
+
+#[derive(Clone)]
+struct LogWriterHandle {
+    file: Arc<Mutex<tokio::fs::File>>,
+}
+
+impl LogWriter {
+    async fn open(path: &Path) -> Result<Self> {
+        let file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .await?;
+        Ok(Self {
+            file: Arc::new(Mutex::new(file)),
+        })
+    }
+
+    fn handle(&self) -> LogWriterHandle {
+        LogWriterHandle {
+            file: self.file.clone(),
+        }
+    }
+}
+
+impl LogWriterHandle {
+    async fn write_record(&self, record: &LogRecord) -> Result<()> {
+        let mut bytes = serde_json::to_vec(record)?;
+        bytes.push(b'\n');
+        let mut guard = self.file.lock().await;
+        guard.write_all(&bytes).await?;
+        // Flush each record so `--tail` sees lines promptly. This is a v1 trade — write
+        // amplification is acceptable for the visibility win.
+        guard.flush().await?;
+        Ok(())
+    }
+}
+
+fn spawn_log_reader<R>(reader: Option<R>, stream: LogStream, writer: LogWriterHandle)
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    let Some(reader) = reader else {
+        return;
+    };
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => break,
+                Ok(_) => {
+                    // BufReader::read_line keeps the trailing newline; strip both LF and CRLF
+                    // so the JSONL record's `line` field is the bare content.
+                    let trimmed = line.trim_end_matches(['\r', '\n']);
+                    let ts = OffsetDateTime::now_utc()
+                        .format(&Rfc3339)
+                        .unwrap_or_else(|_| String::new());
+                    let record = LogRecord {
+                        ts,
+                        stream,
+                        line: trimmed.to_string(),
+                    };
+                    if writer.write_record(&record).await.is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
 }
 
 // Ask the kernel for a free TCP port by binding `:0` on the loopback, then close the listener

@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -35,16 +35,113 @@ pub struct AppSummary {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AppState {
     Stopped,
-    Running { pid: u32, port: u16 },
-    Crashed { exit_code: i32 },
+    Running {
+        pid: u32,
+        port: u16,
+        /// RFC3339 timestamp recorded when the process was spawned. Optional for backward
+        /// compatibility with any serialized state that predates the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at: Option<String>,
+    },
+    Crashed {
+        exit_code: i32,
+    },
 }
 
 impl std::fmt::Display for AppState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AppState::Stopped => write!(f, "stopped"),
-            AppState::Running { pid, port } => write!(f, "running (pid {pid}, port {port})"),
+            AppState::Running { pid, port, .. } => write!(f, "running (pid {pid}, port {port})"),
             AppState::Crashed { exit_code } => write!(f, "crashed (exit {exit_code})"),
         }
     }
+}
+
+/// Stable JSON shape for `adj list --json`. One entry per registered app.
+///
+/// The shape is intentionally flat (no nested `state` object) to match the documented
+/// schema. `port` is present only when the app is running.
+#[derive(Debug, Clone)]
+pub struct ListEntryDto<'a> {
+    pub name: &'a str,
+    pub path: &'a str,
+    pub state: &'a AppState,
+}
+
+impl<'a> Serialize for ListEntryDto<'a> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("name", self.name)?;
+        map.serialize_entry("path", self.path)?;
+        map.serialize_entry("state", state_tag(self.state))?;
+        if let AppState::Running { port, .. } = self.state {
+            map.serialize_entry("port", port)?;
+        }
+        map.end()
+    }
+}
+
+/// Stable JSON shape for `adj status <name> --json`. Optional fields are present
+/// only when meaningful for the current state.
+#[derive(Debug, Clone)]
+pub struct StatusDto<'a> {
+    pub name: &'a str,
+    pub path: &'a str,
+    pub state: &'a AppState,
+}
+
+impl<'a> Serialize for StatusDto<'a> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("name", self.name)?;
+        map.serialize_entry("path", self.path)?;
+        map.serialize_entry("state", state_tag(self.state))?;
+        match self.state {
+            AppState::Running {
+                pid,
+                port,
+                started_at,
+            } => {
+                map.serialize_entry("pid", pid)?;
+                map.serialize_entry("port", port)?;
+                if let Some(ts) = started_at {
+                    map.serialize_entry("started_at", ts)?;
+                }
+            }
+            AppState::Crashed { exit_code } => {
+                map.serialize_entry("exit_code", exit_code)?;
+            }
+            AppState::Stopped => {}
+        }
+        map.end()
+    }
+}
+
+fn state_tag(state: &AppState) -> &'static str {
+    match state {
+        AppState::Stopped => "stopped",
+        AppState::Running { .. } => "running",
+        AppState::Crashed { .. } => "crashed",
+    }
+}
+
+/// One record in the JSONL log file. Each supervised line of stdout/stderr becomes
+/// one of these on disk; `adj logs --json` streams them verbatim, and the plain-text
+/// view projects only the `line` field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogRecord {
+    /// RFC3339 timestamp captured when the supervisor read the line.
+    pub ts: String,
+    pub stream: LogStream,
+    pub line: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LogStream {
+    Stdout,
+    Stderr,
 }
