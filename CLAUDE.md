@@ -78,11 +78,14 @@ Path canonicalization happens **client-side** in `add` — the daemon refuses no
 The daemon never executes as root. Privileged work is emitted as commands the user reviews and sudos.
 
 - `adj install-port-forward` — prints (never runs) a `pfctl` anchor with two `rdr` rules: `:80 → :8080` and `:443 → :8443`. The daemon listens on high ports always; this is how `:80` / `:443` reach it.
-- `adj install-ca` — generates a local CA at `~/.adjacent/ca.{crt,key}` (mode 0600 on the key) and prints the `security add-trusted-cert` command. The daemon issues a wildcard `*.adj.ac` leaf signed by the CA on next start; rotating the CA deletes the cached leaf so a fresh one re-issues.
+- `adj install-ca` — generates a local CA: cert at `~/.adjacent/ca.crt`, private key in the macOS **login keychain** under the label `Adjacent local CA`, marked **non-extractable** (`kSecAttrIsExtractable=false`) so Keychain Access, `security export`, and any `SecItemCopyMatching(kSecReturnData=true)` call refuse to hand out the bytes. The cert carries a critical RFC 5280 `nameConstraints` extension permitting `DNS:adj.ac` only, so a misused CA cannot mint trusted certs for other domains. Prints the `security add-trusted-cert` command. The daemon issues a wildcard `*.adj.ac` leaf signed by the CA on next start (signed through rcgen's `RemoteKeyPair` trait + `SecKeyCreateSignature`, so the CA private key never enters process memory). Rotating the CA deletes the cached leaf so a fresh one re-issues.
+- `adj install-ca --reset` — removes both halves of the keychain key entry plus the on-disk cert/leaf files. Use for fresh start or test teardown. Prints the `security delete-certificate` command for the trust anchor (sudo, not run for you).
+
+  Tried Secure Enclave first; SE requires `keychain-access-groups` entitlements that an unsigned `cargo`-built binary doesn't carry (`SecKeyCreateRandomKey` returns `errSecMissingEntitlement` / OSStatus -34018), so the pivot was non-extractable software ECDSA P-256 in the login keychain. To revisit SE later, codesign the binary with `keychain-access-groups` and add `Token::SecureEnclave` + `Location::DataProtectionKeychain` to the `GenerateKeyOptions` path in `crates/adj/src/tls/keychain.rs`.
 
 ### HTTPS listener
 
-Alongside the HTTP proxy, the daemon opens an HTTPS listener on `:8443` (override `ADJACENT_HTTPS_PORT`). Both share the same request routing — the per-connection serve loop is generic over the stream type. Startup is best-effort: if the CA isn't on disk yet, the HTTPS task logs at `error!` and exits while HTTP and the control plane keep serving. Run `adj install-ca` to opt in.
+Alongside the HTTP proxy, the daemon opens an HTTPS listener on `:8443` (override `ADJACENT_HTTPS_PORT`). Both share the same request routing — the per-connection serve loop is generic over the stream type. Startup is best-effort: if either half of the CA is missing (no cert on disk, or no keychain entry under the install's label), the HTTPS task logs at `error!` and exits while HTTP and the control plane keep serving. Run `adj install-ca` to opt in.
 
 ## Conventions
 

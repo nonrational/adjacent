@@ -17,7 +17,7 @@ Homepage: [adj.ac/ent](https://adj.ac/ent)
 - `$PORT` injected into the boot command. Apps bind to it. Quirky apps can opt into a different variable name via `port_env = "BIND_PORT"` in `adjacent.toml`.
 - Logs on disk at `~/.adjacent/logs/<name>.log`. `adj logs <name> --tail` works.
 - DNS via public wildcard `*.adj.ac → 127.0.0.1`. Offline-mode resolver hook is opt-in.
-- TLS via opt-in local CA.
+- TLS via opt-in local CA. `adj install-ca` provisions a non-extractable ECDSA key in the macOS login keychain (no private key on disk), name-constrained to `*.adj.ac` so the CA cannot mint trusted certs for other domains.
 - **Never runs as root.** Privileged ops emit reviewable commands the user runs with sudo.
 
 ## Status

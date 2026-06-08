@@ -67,7 +67,15 @@ impl TlsSandbox {
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(stdout.contains("security add-trusted-cert"), "banner missing security command: {stdout}");
         assert!(self.home_path.join("ca.crt").exists(), "ca.crt not created");
-        assert!(self.home_path.join("ca.key").exists(), "ca.key not created");
+        // The CA key now lives in the macOS login keychain, not on disk.
+        assert!(
+            !self.home_path.join("ca.key").exists(),
+            "ca.key should NOT exist — CA key lives in the login keychain"
+        );
+        assert!(
+            stdout.contains("login keychain"),
+            "banner should explain keychain storage: {stdout}"
+        );
     }
 
     async fn start_daemon(&mut self) {
@@ -143,6 +151,22 @@ impl TlsSandbox {
             let _ = child.start_kill();
             let _ = child.wait().await;
         }
+    }
+}
+
+impl Drop for TlsSandbox {
+    fn drop(&mut self) {
+        // Each test gets a unique `ADJACENT_HOME`, which the keychain backend uses to derive a
+        // unique SE label. Without this cleanup the dev's login keychain would accumulate one
+        // "Adjacent local CA (/var/folders/...)" entry per test run. Spawn the binary directly
+        // (sync, no tokio) — Drop can't be async and this runs even on panic.
+        let _ = std::process::Command::new(adj_bin())
+            .arg("install-ca")
+            .arg("--reset")
+            .env("ADJACENT_HOME", &self.home_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }
 

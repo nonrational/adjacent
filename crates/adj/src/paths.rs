@@ -8,6 +8,12 @@ pub fn home_dir() -> Result<PathBuf> {
     if let Ok(override_path) = std::env::var(HOME_OVERRIDE_ENV) {
         return Ok(PathBuf::from(override_path));
     }
+    default_home_dir()
+}
+
+/// The ambient `~/.adjacent` path, ignoring `ADJACENT_HOME`. Used when we need to tell apart a
+/// real install from a test sandbox (e.g. when picking a Keychain label).
+pub fn default_home_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("could not determine home directory")?;
     Ok(home.join(".adjacent"))
 }
