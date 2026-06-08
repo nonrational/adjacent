@@ -21,8 +21,33 @@ Homepage: [adj.ac/ent](https://adj.ac/ent)
 
 Coming soon. Work in progress: [github.com/nonrational/adjacent/issues](https://github.com/nonrational/adjacent/issues).
 
-## Development
+## Build and run locally
 
-Toolchain pinned via `asdf` — see `.tool-versions`. Install the rust plugin then run `asdf install` from the repo root.
+Toolchain pinned via `asdf` — see `.tool-versions` (rust 1.92.0, nodejs 26.2.0). Install the asdf plugins then run `asdf install` from the repo root.
+
+```sh
+cargo build                  # workspace build, binary at target/debug/adj
+cargo test                   # unit + integration tests
+cargo run -- daemon          # run the daemon in the foreground (Ctrl-C to stop)
+```
+
+In another shell, against the running daemon:
+
+```sh
+cd path/to/your/app          # must contain adjacent.toml
+cargo run --manifest-path /path/to/adjacent/Cargo.toml -- add .
+cargo run --manifest-path /path/to/adjacent/Cargo.toml -- list
+```
+
+State lives in `~/.adjacent/`. Override with `ADJACENT_HOME=/tmp/adj-sandbox` to keep ad-hoc experiments out of the real home. Proxy port defaults to `8080`; override with `ADJACENT_PROXY_PORT=...`.
+
+Minimal `adjacent.toml`:
+
+```toml
+name = "site"
+cmd = "npm run dev"          # must bind to $PORT
+```
+
+Then `curl -H 'Host: site.adj.ac' http://127.0.0.1:8080/` lazy-boots the app and proxies through. Full `--json` output schema in [`crates/adj/JSON.md`](crates/adj/JSON.md).
 
 The landing page sources live in `ent/`; `just serve` runs `npx live-server` against it.
