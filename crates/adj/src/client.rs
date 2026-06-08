@@ -136,6 +136,20 @@ pub async fn status(name: String, json: bool) -> Result<()> {
     Ok(())
 }
 
+pub async fn wait_ready(name: String, timeout_secs: u64) -> Result<()> {
+    // The daemon blocks the response until ready or timeout — the client just waits on the
+    // socket. Errors (timeout, crash, not registered) come back as `Response::Error`.
+    into_error(
+        request(Request::WaitReady {
+            name: name.clone(),
+            timeout_secs,
+        })
+        .await?,
+    )?;
+    println!("ready `{name}`");
+    Ok(())
+}
+
 pub async fn logs(name: String, tail: bool, json: bool) -> Result<()> {
     let resp = into_error(request(Request::LogPath { name: name.clone() }).await?)?;
     let Response::LogPath { path } = resp else {

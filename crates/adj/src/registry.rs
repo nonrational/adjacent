@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,15 @@ pub struct AppConfig {
     /// will hold an incoming request waiting for a boot to reach TCP-ready before returning 504.
     #[serde(default)]
     pub boot_timeout: Option<u64>,
+    /// Optional HTTP path to poll for readiness on boot. When set, the daemon GETs
+    /// `http://127.0.0.1:<port><health_check_url>` repeatedly and treats the app as ready when
+    /// the response is 2xx. When unset, the daemon falls back to the TCP-open probe.
+    #[serde(default)]
+    pub health_check_url: Option<String>,
+    /// Per-app idle shutdown duration. Accepts `"15m"`, `"30s"`, `"1h"`, or `"off"` to disable.
+    /// When unset, the daemon uses a default of 15 minutes.
+    #[serde(default)]
+    pub idle_timeout: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -84,5 +94,82 @@ pub fn read_app_config(dir: &Path) -> Result<AppConfig> {
     if cfg.cmd.trim().is_empty() {
         return Err(anyhow!("adjacent.toml is missing a non-empty `cmd`"));
     }
+    // Validate idle_timeout eagerly so a typo fails at `add`/`up` time, not silently.
+    if let Some(s) = cfg.idle_timeout.as_deref() {
+        parse_idle_timeout(s)
+            .with_context(|| format!("parsing idle_timeout = \"{}\"", s))?;
+    }
     Ok(cfg)
+}
+
+/// Default idle timeout when the per-app field is unset. 15 minutes — long enough for a
+/// developer to step away and come back to a still-running app, short enough that a forgotten
+/// app doesn't hold the port indefinitely.
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// Parse the `idle_timeout` TOML field. Accepts `"15m"`, `"30s"`, `"1h"`, `"500ms"`, or
+/// `"off"` (case-insensitive) to disable idle shutdown. Returns `Ok(None)` for `"off"`.
+pub fn parse_idle_timeout(raw: &str) -> Result<Option<Duration>> {
+    let s = raw.trim();
+    if s.eq_ignore_ascii_case("off") || s.eq_ignore_ascii_case("disabled") {
+        return Ok(None);
+    }
+    // Split into numeric prefix and unit suffix. We don't pull in `humantime` for this — a
+    // hand-rolled parser keeps the dependency footprint flat.
+    let unit_start = s
+        .find(|c: char| !c.is_ascii_digit())
+        .ok_or_else(|| anyhow!("missing unit suffix (expected `s`, `m`, `h`, or `ms`)"))?;
+    if unit_start == 0 {
+        return Err(anyhow!("missing leading number"));
+    }
+    let (num_part, unit_part) = s.split_at(unit_start);
+    let n: u64 = num_part
+        .parse()
+        .with_context(|| format!("not a non-negative integer: `{}`", num_part))?;
+    let dur = match unit_part {
+        "ms" => Duration::from_millis(n),
+        "s" => Duration::from_secs(n),
+        "m" => Duration::from_secs(n * 60),
+        "h" => Duration::from_secs(n * 60 * 60),
+        other => return Err(anyhow!("unknown duration unit `{}`", other)),
+    };
+    Ok(Some(dur))
+}
+
+/// Resolve `idle_timeout` to a Duration, applying the default when unset. Returns `None` when
+/// idle shutdown is disabled (`"off"`).
+pub fn idle_timeout_for(cfg: &AppConfig) -> Option<Duration> {
+    match cfg.idle_timeout.as_deref() {
+        None => Some(DEFAULT_IDLE_TIMEOUT),
+        Some(s) => parse_idle_timeout(s).unwrap_or(Some(DEFAULT_IDLE_TIMEOUT)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_supported_units() {
+        assert_eq!(parse_idle_timeout("30s").unwrap(), Some(Duration::from_secs(30)));
+        assert_eq!(parse_idle_timeout("15m").unwrap(), Some(Duration::from_secs(900)));
+        assert_eq!(parse_idle_timeout("2h").unwrap(), Some(Duration::from_secs(7200)));
+        assert_eq!(parse_idle_timeout("250ms").unwrap(), Some(Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn off_disables_idle_shutdown() {
+        assert_eq!(parse_idle_timeout("off").unwrap(), None);
+        assert_eq!(parse_idle_timeout("OFF").unwrap(), None);
+        assert_eq!(parse_idle_timeout("disabled").unwrap(), None);
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(parse_idle_timeout("").is_err());
+        assert!(parse_idle_timeout("m").is_err());
+        assert!(parse_idle_timeout("10").is_err());
+        assert!(parse_idle_timeout("10x").is_err());
+        assert!(parse_idle_timeout("abc").is_err());
+    }
 }

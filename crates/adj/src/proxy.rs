@@ -17,13 +17,14 @@ use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
-use crate::registry::{self, Registry};
+use crate::readiness::wait_ready;
+use crate::registry::{self, AppConfig, Registry};
 use crate::supervisor::Supervisor;
 
 const PROXY_PORT_ENV: &str = "ADJACENT_PROXY_PORT";
 const HOST_SUFFIX: &str = ".adj.ac";
-const DEFAULT_BOOT_TIMEOUT_SECS: u64 = 60;
-const TCP_READY_POLL_INTERVAL: Duration = Duration::from_millis(50);
+pub const DEFAULT_BOOT_TIMEOUT_SECS: u64 = 60;
+pub const READY_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 pub fn proxy_port() -> u16 {
     std::env::var(PROXY_PORT_ENV)
@@ -110,7 +111,7 @@ async fn handle(
         }
     };
 
-    let upstream_port = match ensure_running(&name, supervisor, gate).await {
+    let upstream_port = match ensure_running(&name, supervisor.clone(), gate).await {
         Ok(p) => p,
         Err(ProxyError::NotRegistered) => {
             return error_response(
@@ -132,6 +133,10 @@ async fn handle(
             );
         }
     };
+
+    // Record the request against the idle tracker before forwarding so a forward that hangs
+    // for the duration of `idle_timeout` doesn't get spuriously stopped mid-stream.
+    supervisor.touch_idle(&name).await;
 
     match forward(req, upstream_port).await {
         Ok(resp) => resp,
@@ -184,7 +189,6 @@ async fn ensure_running(
             name
         )));
     }
-    let boot_timeout = Duration::from_secs(cfg.boot_timeout.unwrap_or(DEFAULT_BOOT_TIMEOUT_SECS));
 
     // Single-flight: serialize concurrent boot attempts for this name. The first holder runs the
     // boot; later holders re-check state under the lock and find Running.
@@ -200,44 +204,21 @@ async fn ensure_running(
         .await
         .map_err(ProxyError::Other)?;
 
-    // Resolve the assigned port and wait for the child to bind it.
+    let boot_timeout = boot_timeout_for(&cfg);
     let deadline = tokio::time::Instant::now() + boot_timeout;
-    loop {
-        match supervisor.state(name).await {
-            AppState::Running { port, .. } => {
-                if tcp_ready(port, deadline).await {
-                    return Ok(port);
-                }
-                return Err(ProxyError::BootTimeout);
-            }
-            AppState::Crashed { exit_code } => {
-                return Err(ProxyError::Other(anyhow!(
-                    "app `{name}` crashed during boot (exit {exit_code})"
-                )));
-            }
-            AppState::Stopped => {
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(ProxyError::BootTimeout);
-                }
-                tokio::time::sleep(TCP_READY_POLL_INTERVAL).await;
-            }
+    match wait_ready(name, supervisor.as_ref(), &cfg, deadline).await {
+        Ok(port) => Ok(port),
+        Err(crate::readiness::ReadinessError::Timeout) => Err(ProxyError::BootTimeout),
+        Err(crate::readiness::ReadinessError::Crashed { exit_code }) => {
+            Err(ProxyError::Other(anyhow!(
+                "app `{name}` crashed during boot (exit {exit_code})"
+            )))
         }
     }
 }
 
-/// Poll TCP-connect to 127.0.0.1:port until the deadline. Returns true if the child accepts a
-/// connection; false if the deadline elapses first.
-async fn tcp_ready(port: u16, deadline: tokio::time::Instant) -> bool {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    loop {
-        if TcpStream::connect(addr).await.is_ok() {
-            return true;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(TCP_READY_POLL_INTERVAL).await;
-    }
+pub fn boot_timeout_for(cfg: &AppConfig) -> Duration {
+    Duration::from_secs(cfg.boot_timeout.unwrap_or(DEFAULT_BOOT_TIMEOUT_SECS))
 }
 
 async fn forward(

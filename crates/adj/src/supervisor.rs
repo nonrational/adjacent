@@ -3,7 +3,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use adj_protocol::{AppState, LogRecord, LogStream};
 use anyhow::{anyhow, Context, Result};
@@ -18,7 +18,7 @@ use tokio::time::sleep;
 
 use crate::env::load_env_file;
 use crate::paths;
-use crate::registry::AppConfig;
+use crate::registry::{idle_timeout_for, AppConfig};
 
 const TERM_GRACE: Duration = Duration::from_secs(5);
 const PORT_ALLOC_ATTEMPTS: usize = 32;
@@ -40,10 +40,16 @@ struct Inner {
 
 struct AppRuntime {
     state: AppState,
-    // Set when the daemon initiates termination (down, restart's down half). On exit, this
-    // means the process should be recorded as Stopped rather than Crashed even if the shell
-    // propagates the signal as a non-zero exit code.
+    // Set when the daemon initiates termination (down, restart's down half, idle scanner). On
+    // exit, this means the process should be recorded as Stopped rather than Crashed even if
+    // the shell propagates the signal as a non-zero exit code.
     intentional_stop: bool,
+    // Last time a proxied request was routed to this app, used by the idle scanner. Seeded at
+    // boot so a freshly-booted app gets its full idle window before being a stop candidate.
+    last_request: Instant,
+    // Idle window for this app. `None` means idle shutdown is disabled. Captured at boot time
+    // from the resolved config; we don't re-read adjacent.toml during the scan loop.
+    idle_timeout: Option<Duration>,
 }
 
 impl Supervisor {
@@ -154,6 +160,7 @@ impl Supervisor {
             .format(&Rfc3339)
             .unwrap_or_else(|_| String::new());
 
+        let idle_timeout = idle_timeout_for(&cfg);
         inner.apps.insert(
             name.clone(),
             AppRuntime {
@@ -167,6 +174,8 @@ impl Supervisor {
                     },
                 },
                 intentional_stop: false,
+                last_request: Instant::now(),
+                idle_timeout,
             },
         );
         // Detach the wait task so the supervisor can observe exit/crash without holding the lock.
@@ -221,21 +230,71 @@ impl Supervisor {
     }
 
     pub async fn down(&self, name: &str) -> Result<()> {
-        let pid = {
-            let mut inner = self.inner.lock().await;
-            let rt = inner
-                .apps
-                .get_mut(name)
-                .ok_or_else(|| anyhow!("app `{}` is not running", name))?;
-            let pid = match rt.state {
-                AppState::Running { pid, .. } => pid,
-                _ => return Err(anyhow!("app `{}` is not running", name)),
-            };
-            // Flag the upcoming exit as intentional so the wait task records Stopped, not Crashed.
-            rt.intentional_stop = true;
-            pid
-        };
+        let pid = self.begin_intentional_stop(name, None).await?;
+        let pid = pid.ok_or_else(|| anyhow!("app `{}` is not running", name))?;
+        self.finish_stop(name, pid).await
+    }
 
+    /// Like `down`, but re-checks `last_request` under the supervisor lock before flipping
+    /// `intentional_stop`. If a proxied request arrived after the scanner snapshot — i.e. the
+    /// idle window is no longer satisfied — returns `Ok(false)` and leaves the app running.
+    /// Otherwise terminates the app the same way `down` does and returns `Ok(true)`.
+    ///
+    /// Closes the scanner-vs-proxy race: the scanner snapshots candidates, releases the lock,
+    /// then calls into here per-name. Between snapshot and SIGTERM a request can arrive, get
+    /// routed to a still-Running app, and then be cut off mid-forward when the scanner kills
+    /// the process. Re-checking the timestamp under the lock here means that interleaving
+    /// always either (a) stops the app before the request is routed, or (b) skips the stop.
+    pub async fn down_if_idle(&self, name: &str, window: Duration) -> Result<bool> {
+        let Some(pid) = self.begin_intentional_stop(name, Some(window)).await? else {
+            return Ok(false);
+        };
+        self.finish_stop(name, pid).await?;
+        Ok(true)
+    }
+
+    /// Mark an app as intentionally stopping and return its pid. If `min_idle` is `Some(d)`,
+    /// the call is a no-op (returns `Ok(None)`) when the app's `last_request` is more recent
+    /// than `d` — the request-vs-scanner race guard. `Ok(None)` is also returned when the app
+    /// is not currently running and `min_idle` is set (caller treats this as "skip this tick"),
+    /// or as an error to surface to the user when `min_idle` is `None` (i.e. an explicit
+    /// `adj down`).
+    async fn begin_intentional_stop(
+        &self,
+        name: &str,
+        min_idle: Option<Duration>,
+    ) -> Result<Option<u32>> {
+        let mut inner = self.inner.lock().await;
+        let Some(rt) = inner.apps.get_mut(name) else {
+            // For idle-scanner callers a missing entry just means "skip"; the explicit `down`
+            // path turns `Ok(None)` back into an error above.
+            if min_idle.is_some() {
+                return Ok(None);
+            }
+            return Err(anyhow!("app `{}` is not running", name));
+        };
+        let pid = match rt.state {
+            AppState::Running { pid, .. } => pid,
+            _ => {
+                if min_idle.is_some() {
+                    return Ok(None);
+                }
+                return Err(anyhow!("app `{}` is not running", name));
+            }
+        };
+        if let Some(window) = min_idle {
+            if rt.last_request.elapsed() < window {
+                return Ok(None);
+            }
+        }
+        // Flag the upcoming exit as intentional so the wait task records Stopped, not Crashed.
+        rt.intentional_stop = true;
+        Ok(Some(pid))
+    }
+
+    /// SIGTERM the process group, wait for the grace window, escalate to SIGKILL if needed.
+    /// Shared tail of `down` and `down_if_idle`.
+    async fn finish_stop(&self, name: &str, pid: u32) -> Result<()> {
         // Signal the whole process group (negative PID). The supervised PID is the shell's PID
         // which we made the process-group leader via .process_group(0), so -pid reaches every
         // descendant including the real dev server.
@@ -269,6 +328,106 @@ impl Supervisor {
             "failed to terminate `{}` within grace window",
             name
         ))
+    }
+
+    /// Stamp `name`'s last-request timestamp. Called by the proxy on every routed request so
+    /// the idle scanner can tell which apps are quiet. A no-op for apps not currently running.
+    pub async fn touch_idle(&self, name: &str) {
+        let mut inner = self.inner.lock().await;
+        if let Some(rt) = inner.apps.get_mut(name) {
+            if matches!(rt.state, AppState::Running { .. }) {
+                rt.last_request = Instant::now();
+            }
+        }
+    }
+
+    /// Snapshot every running app's idle status. Returned tuples are `(name, idle_for)` —
+    /// callers compare against the app's configured `idle_timeout` to decide whether to stop.
+    pub async fn idle_candidates(&self) -> Vec<(String, Duration, Option<Duration>)> {
+        let inner = self.inner.lock().await;
+        let now = Instant::now();
+        inner
+            .apps
+            .iter()
+            .filter_map(|(name, rt)| {
+                if !matches!(rt.state, AppState::Running { .. }) {
+                    return None;
+                }
+                Some((
+                    name.clone(),
+                    now.saturating_duration_since(rt.last_request),
+                    rt.idle_timeout,
+                ))
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+impl Supervisor {
+    /// Insert a fake `Running` runtime entry for unit tests. Lets us exercise the lock-side
+    /// behavior of `down_if_idle` without spawning a real process.
+    async fn insert_fake_running(&self, name: &str, last_request: Instant) {
+        let mut inner = self.inner.lock().await;
+        inner.apps.insert(
+            name.to_string(),
+            AppRuntime {
+                state: AppState::Running {
+                    pid: 1,
+                    port: 1,
+                    started_at: None,
+                },
+                intentional_stop: false,
+                last_request,
+                idle_timeout: None,
+            },
+        );
+    }
+
+    async fn intentional_stop_flag(&self, name: &str) -> Option<bool> {
+        let inner = self.inner.lock().await;
+        inner.apps.get(name).map(|rt| rt.intentional_stop)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn down_if_idle_skips_when_request_arrived_after_snapshot() {
+        // Scenario: the idle scanner observed `last_request` older than the window, then a
+        // proxied request landed and bumped `last_request` to ~now. By the time the scanner
+        // asks the supervisor to stop the app, the window is no longer satisfied. The guard
+        // re-checks under the lock and returns Ok(false), leaving the app alone.
+        let sup = Supervisor::new();
+        sup.insert_fake_running("hot", Instant::now()).await;
+        let result = sup
+            .down_if_idle("hot", Duration::from_secs(30))
+            .await
+            .expect("call should not error");
+        assert!(!result, "expected Ok(false) when last_request is recent");
+        // No SIGTERM was sent because we returned before begin_intentional_stop flipped the
+        // flag — verify intentional_stop is still false so the watcher would correctly mark
+        // a real crash as Crashed.
+        assert_eq!(sup.intentional_stop_flag("hot").await, Some(false));
+        // And the state is still Running.
+        assert!(matches!(
+            sup.state("hot").await,
+            AppState::Running { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn down_if_idle_skips_when_app_missing() {
+        // Idle scanner snapshot can name an app that's since been removed; the guard treats
+        // missing entries as "skip" rather than an error so the scanner loop stays quiet.
+        let sup = Supervisor::new();
+        let result = sup
+            .down_if_idle("ghost", Duration::from_secs(0))
+            .await
+            .expect("missing entry should not error");
+        assert!(!result);
     }
 }
 
