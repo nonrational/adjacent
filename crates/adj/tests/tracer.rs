@@ -81,6 +81,12 @@ async fn write_app(dir: &Path, name: &str, cmd: &str) {
     tokio::fs::write(manifest, body).await.expect("write toml");
 }
 
+async fn write_app_with_port_env(dir: &Path, name: &str, cmd: &str, port_env: &str) {
+    let manifest = dir.join("adjacent.toml");
+    let body = format!("name = \"{name}\"\ncmd = \"{cmd}\"\nport_env = \"{port_env}\"\n");
+    tokio::fs::write(manifest, body).await.expect("write toml");
+}
+
 async fn wait_for<F>(mut check: F, label: &str, deadline: Duration)
 where
     F: FnMut() -> bool,
@@ -379,5 +385,243 @@ async fn crash_is_reported_with_exit_code() {
     assert!(last.contains("crashed"), "never saw crashed state: {last}");
     assert!(last.contains("42"), "exit code missing from status: {last}");
 
+    sandbox.stop_daemon().await;
+}
+
+// Parse "running (pid <pid>, port <port>)" out of a status line.
+fn parse_status_port(status_out: &str) -> Option<u16> {
+    let marker = "port ";
+    let idx = status_out.find(marker)?;
+    let tail = &status_out[idx + marker.len()..];
+    let end = tail.find(|c: char| !c.is_ascii_digit()).unwrap_or(tail.len());
+    tail[..end].parse().ok()
+}
+
+#[tokio::test]
+async fn port_is_injected_and_visible_in_status() {
+    let mut sandbox = Sandbox::new().await;
+    sandbox.start_daemon().await;
+
+    let app_dir = TempDir::new().expect("app dir");
+    let port_file = app_dir.path().join("port.txt");
+    // Echo $PORT to a file, then block so the child stays running while we inspect status.
+    let cmd = format!(
+        "echo $PORT > {}; sleep 60",
+        port_file.display()
+    );
+    write_app(app_dir.path(), "port-demo", &cmd).await;
+
+    let add = sandbox
+        .cmd()
+        .arg("add")
+        .arg(app_dir.path())
+        .output()
+        .await
+        .expect("add");
+    assert!(add.status.success(), "add: {:?}", add);
+
+    let up = sandbox
+        .cmd()
+        .arg("up")
+        .arg("port-demo")
+        .output()
+        .await
+        .expect("up");
+    assert!(up.status.success(), "up: {:?}", up);
+
+    wait_for(
+        || port_file.exists() && std::fs::metadata(&port_file).map(|m| m.len() > 0).unwrap_or(false),
+        "child to write its port",
+        Duration::from_secs(5),
+    )
+    .await;
+    let child_port: u16 = std::fs::read_to_string(&port_file)
+        .expect("read port file")
+        .trim()
+        .parse()
+        .expect("parse port");
+    assert!(child_port > 0, "child saw port 0");
+
+    let status = sandbox
+        .cmd()
+        .arg("status")
+        .arg("port-demo")
+        .output()
+        .await
+        .expect("status");
+    let status_out = String::from_utf8_lossy(&status.stdout).into_owned();
+    assert!(status_out.contains("running"), "status: {status_out}");
+    let reported_port =
+        parse_status_port(&status_out).unwrap_or_else(|| panic!("no port in: {status_out}"));
+    assert_eq!(
+        child_port, reported_port,
+        "child saw PORT={child_port} but status reports port {reported_port}"
+    );
+
+    let _ = sandbox
+        .cmd()
+        .arg("down")
+        .arg("port-demo")
+        .output()
+        .await
+        .expect("down");
+    sandbox.stop_daemon().await;
+}
+
+#[tokio::test]
+async fn port_env_renames_the_injected_variable() {
+    let mut sandbox = Sandbox::new().await;
+    sandbox.start_daemon().await;
+
+    let app_dir = TempDir::new().expect("app dir");
+    let env_dump = app_dir.path().join("env.txt");
+    // Record both variables so the test can confirm BIND_PORT is set and PORT is not.
+    let cmd = format!(
+        "echo BIND_PORT=$BIND_PORT > {0}; echo PORT=$PORT >> {0}; sleep 60",
+        env_dump.display()
+    );
+    write_app_with_port_env(app_dir.path(), "renamed", &cmd, "BIND_PORT").await;
+
+    let _ = sandbox
+        .cmd()
+        .arg("add")
+        .arg(app_dir.path())
+        .output()
+        .await
+        .expect("add");
+    let up = sandbox
+        .cmd()
+        .arg("up")
+        .arg("renamed")
+        .output()
+        .await
+        .expect("up");
+    assert!(up.status.success(), "up: {:?}", up);
+
+    wait_for(
+        || std::fs::metadata(&env_dump).map(|m| m.len() > 0).unwrap_or(false),
+        "child to write env dump",
+        Duration::from_secs(5),
+    )
+    .await;
+    // Give the shell a beat to write both lines.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let dump = std::fs::read_to_string(&env_dump).expect("read env dump");
+    let bind_line = dump
+        .lines()
+        .find(|l| l.starts_with("BIND_PORT="))
+        .unwrap_or_else(|| panic!("no BIND_PORT line in: {dump}"));
+    let port_line = dump
+        .lines()
+        .find(|l| l.starts_with("PORT="))
+        .unwrap_or_else(|| panic!("no PORT line in: {dump}"));
+    let bind_val = bind_line.trim_start_matches("BIND_PORT=").trim();
+    let port_val = port_line.trim_start_matches("PORT=").trim();
+    assert!(
+        !bind_val.is_empty() && bind_val != "0",
+        "BIND_PORT was not set ({bind_line})"
+    );
+    assert!(
+        port_val.is_empty(),
+        "PORT should be unset when port_env=BIND_PORT, got `{port_val}`"
+    );
+
+    // status should still report the assigned port — display is independent of the env-var name.
+    let status = sandbox
+        .cmd()
+        .arg("status")
+        .arg("renamed")
+        .output()
+        .await
+        .expect("status");
+    let status_out = String::from_utf8_lossy(&status.stdout).into_owned();
+    let reported_port =
+        parse_status_port(&status_out).unwrap_or_else(|| panic!("no port in: {status_out}"));
+    let bind_port: u16 = bind_val.parse().expect("BIND_PORT not numeric");
+    assert_eq!(bind_port, reported_port);
+
+    let _ = sandbox
+        .cmd()
+        .arg("down")
+        .arg("renamed")
+        .output()
+        .await
+        .expect("down");
+    sandbox.stop_daemon().await;
+}
+
+#[tokio::test]
+async fn two_supervised_apps_get_distinct_ports() {
+    let mut sandbox = Sandbox::new().await;
+    sandbox.start_daemon().await;
+
+    let dir_a = TempDir::new().expect("dir a");
+    let port_a = dir_a.path().join("port.txt");
+    write_app(
+        dir_a.path(),
+        "twin-a",
+        &format!("echo $PORT > {}; sleep 60", port_a.display()),
+    )
+    .await;
+    let dir_b = TempDir::new().expect("dir b");
+    let port_b = dir_b.path().join("port.txt");
+    write_app(
+        dir_b.path(),
+        "twin-b",
+        &format!("echo $PORT > {}; sleep 60", port_b.display()),
+    )
+    .await;
+
+    for (dir, name) in [(dir_a.path(), "twin-a"), (dir_b.path(), "twin-b")] {
+        let add = sandbox
+            .cmd()
+            .arg("add")
+            .arg(dir)
+            .output()
+            .await
+            .expect("add");
+        assert!(add.status.success(), "add {name}: {:?}", add);
+        let up = sandbox
+            .cmd()
+            .arg("up")
+            .arg(name)
+            .output()
+            .await
+            .expect("up");
+        assert!(up.status.success(), "up {name}: {:?}", up);
+    }
+
+    wait_for(
+        || {
+            [&port_a, &port_b].iter().all(|p| {
+                std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false)
+            })
+        },
+        "both children to write port files",
+        Duration::from_secs(5),
+    )
+    .await;
+
+    let a: u16 = std::fs::read_to_string(&port_a)
+        .expect("port a")
+        .trim()
+        .parse()
+        .expect("parse a");
+    let b: u16 = std::fs::read_to_string(&port_b)
+        .expect("port b")
+        .trim()
+        .parse()
+        .expect("parse b");
+    assert_ne!(a, b, "twin-a and twin-b ended up on the same port: {a}");
+
+    for name in ["twin-a", "twin-b"] {
+        let _ = sandbox
+            .cmd()
+            .arg("down")
+            .arg(name)
+            .output()
+            .await
+            .expect("down");
+    }
     sandbox.stop_daemon().await;
 }

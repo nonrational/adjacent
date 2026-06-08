@@ -10,6 +10,10 @@ use crate::paths;
 pub struct AppConfig {
     pub name: String,
     pub cmd: String,
+    /// Override the env var name used to inject the assigned port.
+    /// When unset, Adjacent exports `PORT`. When set, it exports the named variable instead.
+    #[serde(default)]
+    pub port_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
