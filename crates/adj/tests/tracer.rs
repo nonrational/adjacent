@@ -33,6 +33,11 @@ impl Sandbox {
         let mut c = Command::new(adj_bin());
         c.env("ADJACENT_HOME", &self.home_path);
         c.env("RUST_LOG", "warn");
+        // Scrub port-related env vars from the parent shell so the daemon (and any child it
+        // spawns) starts from a known-clean slate. Without this, `PORT=3000 cargo test` would
+        // pass `PORT` through to the supervised child and silently break the rename test.
+        c.env_remove("PORT");
+        c.env_remove("BIND_PORT");
         c
     }
 
