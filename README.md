@@ -11,6 +11,9 @@ Homepage: [adj.ac/ent](https://adj.ac/ent)
 - One CLI: `adj`. Same surface for human and agent — every read command supports `--json` ([schema](crates/adj/JSON.md)).
 - One entry per app. `adj add <path>` registers; per-app config lives in `adjacent.toml`.
 - Lazy-boot by default. Hit `foo.adj.ac`, the app starts, the request proxies through.
+- Readiness probing. Default is TCP-connect; set `health_check_url = "/healthz"` and the proxy waits for a 2xx before forwarding.
+- Idle shutdown. Apps stop after no proxied requests for `idle_timeout` (default `"15m"`, accepts `"30s"` / `"1h"` / `"off"`).
+- `adj wait-ready <name>` blocks until the app reports ready — handy in agent workflows after `adj restart`.
 - `$PORT` injected into the boot command. Apps bind to it. Quirky apps can opt into a different variable name via `port_env = "BIND_PORT"` in `adjacent.toml`.
 - Logs on disk at `~/.adjacent/logs/<name>.log`. `adj logs <name> --tail` works.
 - DNS via public wildcard `*.adj.ac → 127.0.0.1`. Offline-mode resolver hook is opt-in.
@@ -45,7 +48,11 @@ Minimal `adjacent.toml`:
 
 ```toml
 name = "site"
-cmd = "npm run dev"          # must bind to $PORT
+cmd = "npm run dev"           # must bind to $PORT
+
+# Optional:
+health_check_url = "/healthz" # poll for 2xx instead of TCP-open
+idle_timeout = "30m"          # stop after no requests (default "15m", or "off")
 ```
 
 Then `curl -H 'Host: site.adj.ac' http://127.0.0.1:8080/` lazy-boots the app and proxies through. Full `--json` output schema in [`crates/adj/JSON.md`](crates/adj/JSON.md).
