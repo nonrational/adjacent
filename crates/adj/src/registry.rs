@@ -14,6 +14,14 @@ pub struct AppConfig {
     /// When unset, Adjacent exports `PORT`. When set, it exports the named variable instead.
     #[serde(default)]
     pub port_env: Option<String>,
+    /// Committed-safe environment variables merged into the spawned process env.
+    /// On conflict with `env_file`, this table wins. PORT injection always wins over both.
+    #[serde(default)]
+    pub env: Option<BTreeMap<String, String>>,
+    /// Path to a dotenv-format file, resolved relative to the registered app directory.
+    /// Missing files are a startup error.
+    #[serde(default)]
+    pub env_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -630,3 +630,368 @@ async fn two_supervised_apps_get_distinct_ports() {
     }
     sandbox.stop_daemon().await;
 }
+
+// Write an adjacent.toml with arbitrary extra trailing TOML appended after name/cmd.
+async fn write_app_with_extra(dir: &Path, name: &str, cmd: &str, extra: &str) {
+    let manifest = dir.join("adjacent.toml");
+    let body = format!("name = \"{name}\"\ncmd = \"{cmd}\"\n{extra}");
+    tokio::fs::write(manifest, body).await.expect("write toml");
+}
+
+async fn add_and_up(sandbox: &Sandbox, app_dir: &Path, name: &str) {
+    let add = sandbox
+        .cmd()
+        .arg("add")
+        .arg(app_dir)
+        .output()
+        .await
+        .expect("add");
+    assert!(
+        add.status.success(),
+        "add {name}: stdout={} stderr={}",
+        String::from_utf8_lossy(&add.stdout),
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let up = sandbox
+        .cmd()
+        .arg("up")
+        .arg(name)
+        .output()
+        .await
+        .expect("up");
+    assert!(
+        up.status.success(),
+        "up {name}: stderr={}",
+        String::from_utf8_lossy(&up.stderr)
+    );
+}
+
+#[tokio::test]
+async fn env_table_values_reach_child() {
+    let mut sandbox = Sandbox::new().await;
+    sandbox.start_daemon().await;
+
+    let app_dir = TempDir::new().expect("app dir");
+    let dump = app_dir.path().join("dump.txt");
+    let cmd = format!(
+        "echo LOG_LEVEL=$LOG_LEVEL > {0}; echo GREETING=$GREETING >> {0}; sleep 60",
+        dump.display()
+    );
+    write_app_with_extra(
+        app_dir.path(),
+        "env-table",
+        &cmd,
+        "[env]\nLOG_LEVEL = \"debug\"\nGREETING = \"hello\"\n",
+    )
+    .await;
+
+    add_and_up(&sandbox, app_dir.path(), "env-table").await;
+
+    wait_for(
+        || std::fs::metadata(&dump).map(|m| m.len() > 0).unwrap_or(false),
+        "child to write env dump",
+        Duration::from_secs(5),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let raw = std::fs::read_to_string(&dump).expect("read dump");
+    assert!(raw.contains("LOG_LEVEL=debug"), "dump: {raw}");
+    assert!(raw.contains("GREETING=hello"), "dump: {raw}");
+
+    let _ = sandbox
+        .cmd()
+        .arg("down")
+        .arg("env-table")
+        .output()
+        .await
+        .expect("down");
+    sandbox.stop_daemon().await;
+}
+
+#[tokio::test]
+async fn env_file_values_reach_child() {
+    let mut sandbox = Sandbox::new().await;
+    sandbox.start_daemon().await;
+
+    let app_dir = TempDir::new().expect("app dir");
+    tokio::fs::write(
+        app_dir.path().join(".env.local"),
+        "SECRET=shhh\nDATABASE_URL=\"postgres://x/y\"\n# comment line\n",
+    )
+    .await
+    .expect("write env file");
+    let dump = app_dir.path().join("dump.txt");
+    let cmd = format!(
+        "echo SECRET=$SECRET > {0}; echo DATABASE_URL=$DATABASE_URL >> {0}; sleep 60",
+        dump.display()
+    );
+    write_app_with_extra(
+        app_dir.path(),
+        "env-file",
+        &cmd,
+        "env_file = \".env.local\"\n",
+    )
+    .await;
+
+    add_and_up(&sandbox, app_dir.path(), "env-file").await;
+
+    wait_for(
+        || std::fs::metadata(&dump).map(|m| m.len() > 0).unwrap_or(false),
+        "child to write env dump",
+        Duration::from_secs(5),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let raw = std::fs::read_to_string(&dump).expect("read dump");
+    assert!(raw.contains("SECRET=shhh"), "dump: {raw}");
+    assert!(raw.contains("DATABASE_URL=postgres://x/y"), "dump: {raw}");
+
+    let _ = sandbox
+        .cmd()
+        .arg("down")
+        .arg("env-file")
+        .output()
+        .await
+        .expect("down");
+    sandbox.stop_daemon().await;
+}
+
+#[tokio::test]
+async fn env_table_wins_over_env_file_on_collision() {
+    let mut sandbox = Sandbox::new().await;
+    sandbox.start_daemon().await;
+
+    let app_dir = TempDir::new().expect("app dir");
+    tokio::fs::write(app_dir.path().join(".env.local"), "MODE=from-file\n")
+        .await
+        .expect("write env file");
+    let dump = app_dir.path().join("dump.txt");
+    let cmd = format!("echo MODE=$MODE > {}; sleep 60", dump.display());
+    write_app_with_extra(
+        app_dir.path(),
+        "collision",
+        &cmd,
+        "env_file = \".env.local\"\n[env]\nMODE = \"from-table\"\n",
+    )
+    .await;
+
+    add_and_up(&sandbox, app_dir.path(), "collision").await;
+
+    wait_for(
+        || std::fs::metadata(&dump).map(|m| m.len() > 0).unwrap_or(false),
+        "child to write env dump",
+        Duration::from_secs(5),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let raw = std::fs::read_to_string(&dump).expect("read dump");
+    assert!(
+        raw.contains("MODE=from-table"),
+        "[env] should win over env_file, got: {raw}"
+    );
+
+    let _ = sandbox
+        .cmd()
+        .arg("down")
+        .arg("collision")
+        .output()
+        .await
+        .expect("down");
+    sandbox.stop_daemon().await;
+}
+
+#[tokio::test]
+async fn port_injection_wins_over_env_sources() {
+    let mut sandbox = Sandbox::new().await;
+    sandbox.start_daemon().await;
+
+    let app_dir = TempDir::new().expect("app dir");
+    // Try to poison PORT from both sources. Adjacent must overwrite with the allocated port.
+    tokio::fs::write(app_dir.path().join(".env.local"), "PORT=11111\n")
+        .await
+        .expect("write env file");
+    let dump = app_dir.path().join("dump.txt");
+    let cmd = format!("echo PORT=$PORT > {}; sleep 60", dump.display());
+    write_app_with_extra(
+        app_dir.path(),
+        "port-wins",
+        &cmd,
+        "env_file = \".env.local\"\n[env]\nPORT = \"9999\"\n",
+    )
+    .await;
+
+    add_and_up(&sandbox, app_dir.path(), "port-wins").await;
+
+    wait_for(
+        || std::fs::metadata(&dump).map(|m| m.len() > 0).unwrap_or(false),
+        "child to write env dump",
+        Duration::from_secs(5),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let raw = std::fs::read_to_string(&dump).expect("read dump");
+
+    let status = sandbox
+        .cmd()
+        .arg("status")
+        .arg("port-wins")
+        .output()
+        .await
+        .expect("status");
+    let status_out = String::from_utf8_lossy(&status.stdout).into_owned();
+    let assigned_port =
+        parse_status_port(&status_out).unwrap_or_else(|| panic!("no port in: {status_out}"));
+
+    assert!(
+        raw.contains(&format!("PORT={assigned_port}")),
+        "child saw poisoned PORT instead of Adjacent's {assigned_port}: {raw}"
+    );
+    assert!(
+        !raw.contains("PORT=9999") && !raw.contains("PORT=11111"),
+        "child saw a user-declared PORT value: {raw}"
+    );
+
+    let _ = sandbox
+        .cmd()
+        .arg("down")
+        .arg("port-wins")
+        .output()
+        .await
+        .expect("down");
+    sandbox.stop_daemon().await;
+}
+
+#[tokio::test]
+async fn missing_env_file_is_a_startup_error() {
+    let mut sandbox = Sandbox::new().await;
+    sandbox.start_daemon().await;
+
+    let app_dir = TempDir::new().expect("app dir");
+    // Reference a file that doesn't exist.
+    write_app_with_extra(
+        app_dir.path(),
+        "no-envfile",
+        "echo should-not-run; sleep 60",
+        "env_file = \".env.local\"\n",
+    )
+    .await;
+
+    let add = sandbox
+        .cmd()
+        .arg("add")
+        .arg(app_dir.path())
+        .output()
+        .await
+        .expect("add");
+    assert!(add.status.success(), "add: {:?}", add);
+    let up = sandbox
+        .cmd()
+        .arg("up")
+        .arg("no-envfile")
+        .output()
+        .await
+        .expect("up");
+    assert!(
+        !up.status.success(),
+        "up should fail when env_file is missing: stdout={}",
+        String::from_utf8_lossy(&up.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&up.stderr);
+    assert!(
+        stderr.contains("env_file not found"),
+        "expected env_file error, got: {stderr}"
+    );
+
+    // status should report stopped — the process never started.
+    let status = sandbox
+        .cmd()
+        .arg("status")
+        .arg("no-envfile")
+        .output()
+        .await
+        .expect("status");
+    let status_out = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        status_out.contains("stopped"),
+        "expected stopped state, got: {status_out}"
+    );
+
+    sandbox.stop_daemon().await;
+}
+
+#[tokio::test]
+async fn env_file_resolves_relative_to_app_path() {
+    // Regression guard: if `env_file` is resolved against the daemon's CWD instead of the
+    // registered app dir, a relative path like `.env.local` would land in the daemon home and
+    // fail. We start the daemon with its CWD set to an unrelated tempdir, register the app
+    // somewhere else, and confirm `env_file = ".env.local"` still resolves correctly.
+    let mut sandbox = Sandbox::new().await;
+
+    let daemon_cwd = TempDir::new().expect("daemon cwd");
+    let mut c = sandbox.cmd();
+    c.arg("daemon");
+    c.current_dir(daemon_cwd.path());
+    c.stdout(Stdio::null());
+    c.stderr(Stdio::null());
+    let child = c.spawn().expect("spawn daemon");
+    sandbox.daemon = Some(child);
+
+    // Replicates Sandbox::start_daemon's readiness probe.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let sock = sandbox.home_path.join("sock");
+    while Instant::now() < deadline {
+        if sock.exists() {
+            let out = sandbox
+                .cmd()
+                .arg("status")
+                .arg("__probe__")
+                .output()
+                .await
+                .expect("probe");
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if !stderr.contains("daemon not reachable") {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let app_dir = TempDir::new().expect("app dir");
+    tokio::fs::write(app_dir.path().join(".env.local"), "HELLO=world\n")
+        .await
+        .expect("write env file");
+    let dump = app_dir.path().join("dump.txt");
+    let cmd = format!("echo HELLO=$HELLO > {}; sleep 60", dump.display());
+    write_app_with_extra(
+        app_dir.path(),
+        "rel-envfile",
+        &cmd,
+        "env_file = \".env.local\"\n",
+    )
+    .await;
+
+    // Sanity check: app dir is *not* a subdirectory of the daemon's CWD, so a CWD-relative
+    // resolution would land elsewhere.
+    assert!(!app_dir.path().starts_with(daemon_cwd.path()));
+
+    add_and_up(&sandbox, app_dir.path(), "rel-envfile").await;
+
+    wait_for(
+        || std::fs::metadata(&dump).map(|m| m.len() > 0).unwrap_or(false),
+        "child to write env dump",
+        Duration::from_secs(5),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let raw = std::fs::read_to_string(&dump).expect("read dump");
+    assert!(raw.contains("HELLO=world"), "dump: {raw}");
+
+    let _ = sandbox
+        .cmd()
+        .arg("down")
+        .arg("rel-envfile")
+        .output()
+        .await
+        .expect("down");
+    sandbox.stop_daemon().await;
+}
