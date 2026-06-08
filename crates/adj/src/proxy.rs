@@ -20,8 +20,10 @@ use tokio::sync::Mutex;
 use crate::readiness::wait_ready;
 use crate::registry::{self, AppConfig, Registry};
 use crate::supervisor::Supervisor;
+use crate::tls;
 
 const PROXY_PORT_ENV: &str = "ADJACENT_PROXY_PORT";
+const HTTPS_PORT_ENV: &str = "ADJACENT_HTTPS_PORT";
 const HOST_SUFFIX: &str = ".adj.ac";
 pub const DEFAULT_BOOT_TIMEOUT_SECS: u64 = 60;
 pub const READY_POLL_INTERVAL: Duration = Duration::from_millis(200);
@@ -31,6 +33,13 @@ pub fn proxy_port() -> u16 {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(8080)
+}
+
+pub fn https_port() -> u16 {
+    std::env::var(HTTPS_PORT_ENV)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8443)
 }
 
 /// Per-name boot lock map. Holding the inner `Mutex` while booting keeps the boot single-flight:
@@ -75,20 +84,73 @@ pub async fn run(supervisor: Arc<Supervisor>) -> Result<()> {
         let sup = supervisor.clone();
         let gate = gate.clone();
         tokio::spawn(async move {
-            let io = TokioIo::new(stream);
-            let service = service_fn(move |req: Request<Incoming>| {
-                let sup = sup.clone();
-                let gate = gate.clone();
-                async move { Ok::<_, Infallible>(handle(req, sup, gate).await) }
-            });
-            if let Err(err) = server_http1::Builder::new()
-                .serve_connection(io, service)
-                .with_upgrades()
-                .await
-            {
-                tracing::debug!("proxy connection ended: {err}");
-            }
+            serve_plain(stream, sup, gate).await;
         });
+    }
+}
+
+/// HTTPS listener: terminates TLS with the locally-issued wildcard cert, then dispatches into
+/// the same per-request handler the HTTP path uses. Startup is best-effort — if the local CA
+/// hasn't been generated yet the daemon logs and keeps serving HTTP only (AC #5 in issue #6).
+pub async fn run_https(supervisor: Arc<Supervisor>) -> Result<()> {
+    let server_config = tls::server_config()
+        .map_err(|e| anyhow!("loading TLS config: {e}"))?;
+    let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
+
+    let port = https_port();
+    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(|e| anyhow!("binding https listener at {addr}: {e}"))?;
+    tracing::info!("adj https proxy listening at https://{addr}");
+
+    let gate = Arc::new(BootGate::new());
+
+    loop {
+        let (stream, _peer) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(err) => {
+                tracing::warn!("https accept failed: {err}");
+                continue;
+            }
+        };
+        let sup = supervisor.clone();
+        let gate = gate.clone();
+        let acceptor = acceptor.clone();
+        tokio::spawn(async move {
+            // TLS handshake is per-connection. Failures here are noisy under normal browser
+            // probing (favicon retries, abandoned sessions) so log at debug, not warn.
+            let tls_stream = match acceptor.accept(stream).await {
+                Ok(s) => s,
+                Err(err) => {
+                    tracing::debug!("tls handshake failed: {err}");
+                    return;
+                }
+            };
+            serve_plain(tls_stream, sup, gate).await;
+        });
+    }
+}
+
+/// Run one HTTP/1.1 connection against the proxy's per-request handler. Parameterized over the
+/// underlying stream so the HTTP and HTTPS listeners share the same serve loop — the difference
+/// between them is purely accept-time framing.
+async fn serve_plain<S>(stream: S, sup: Arc<Supervisor>, gate: Arc<BootGate>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let io = TokioIo::new(stream);
+    let service = service_fn(move |req: Request<Incoming>| {
+        let sup = sup.clone();
+        let gate = gate.clone();
+        async move { Ok::<_, Infallible>(handle(req, sup, gate).await) }
+    });
+    if let Err(err) = server_http1::Builder::new()
+        .serve_connection(io, service)
+        .with_upgrades()
+        .await
+    {
+        tracing::debug!("proxy connection ended: {err}");
     }
 }
 
@@ -192,7 +254,7 @@ async fn ensure_running(
     // We intentionally do NOT short-circuit on a Running state outside the lock. The supervisor
     // flips state to Running the moment it spawns the child — before the child has bound its
     // port. A second concurrent first-request that observed Running here and skipped wait_ready
-    // would forward to a port that wasn't accepting yet and get back a spurious 502.
+    // would forward to a port that wasn't accepting yet and get back a spurious 502. See #28.
     let name_lock = gate.lock_for(name).await;
     let _guard = name_lock.lock().await;
 
