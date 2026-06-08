@@ -8,7 +8,7 @@ Homepage: [adj.ac/ent](https://adj.ac/ent)
 
 ## Shape (v1)
 
-- One CLI: `adj`. Same surface for human and agent — every read command supports `--json`.
+- One CLI: `adj`. Same surface for human and agent — every read command supports `--json` ([schema](crates/adj/JSON.md)).
 - One entry per app. `adj add <path>` registers; per-app config lives in `adjacent.toml`.
 - Lazy-boot by default. Hit `foo.adj.ac`, the app starts, the request proxies through.
 - `$PORT` injected into the boot command. Apps bind to it. Quirky apps can opt into a different variable name via `port_env = "BIND_PORT"` in `adjacent.toml`.
