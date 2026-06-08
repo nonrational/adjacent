@@ -1,0 +1,4 @@
+name = "hello-node"
+cmd = "node server.js"
+health_check_url = "/healthz"
+idle_timeout = "5m"

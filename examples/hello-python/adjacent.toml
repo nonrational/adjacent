@@ -1,0 +1,4 @@
+name = "hello-python"
+cmd = "python3 server.py"
+health_check_url = "/healthz"
+idle_timeout = "5m"
