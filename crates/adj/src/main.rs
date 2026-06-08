@@ -2,6 +2,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+mod agent_docs;
 mod client;
 mod daemon;
 mod env;
@@ -66,6 +67,13 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         timeout: u64,
     },
+    /// Print a markdown steering doc telling AI coding agents how to interact with
+    /// the Adjacent-supervised app in the target directory.
+    AgentInstructions {
+        /// Directory containing `adjacent.toml`. Defaults to the current directory.
+        #[arg(long)]
+        path: Option<String>,
+    },
     /// Print the pf anchor and the sudo command to redirect :80 to the proxy port.
     InstallPortForward,
 }
@@ -84,6 +92,7 @@ async fn main() -> ExitCode {
         Cmd::Status { name, json } => client::status(name, json).await,
         Cmd::Logs { name, tail, json } => client::logs(name, tail, json).await,
         Cmd::WaitReady { name, timeout } => client::wait_ready(name, timeout).await,
+        Cmd::AgentInstructions { path } => agent_docs::emit(path),
         Cmd::InstallPortForward => portforward::install(),
     };
 
