@@ -8,6 +8,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
 use crate::paths;
+use crate::proxy;
 use crate::registry::{self, Registry};
 use crate::supervisor::Supervisor;
 
@@ -44,6 +45,15 @@ pub async fn run() -> Result<()> {
         if tokio::signal::ctrl_c().await.is_ok() {
             let _ = std::fs::remove_file(&socket_for_signal);
             std::process::exit(0);
+        }
+    });
+
+    // Reverse proxy runs in the same process as the control-plane listener; failures here are
+    // logged but don't kill the daemon — the control plane is still useful without the proxy.
+    let proxy_supervisor = supervisor.clone();
+    tokio::spawn(async move {
+        if let Err(err) = proxy::run(proxy_supervisor).await {
+            tracing::error!("proxy listener exited: {err}");
         }
     });
 
