@@ -22,6 +22,10 @@ pub struct AppConfig {
     /// Missing files are a startup error.
     #[serde(default)]
     pub env_file: Option<String>,
+    /// Per-app override for the proxy lazy-boot timeout, in seconds. Caps how long the proxy
+    /// will hold an incoming request waiting for a boot to reach TCP-ready before returning 504.
+    #[serde(default)]
+    pub boot_timeout: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

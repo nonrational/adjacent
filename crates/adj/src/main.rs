@@ -6,6 +6,8 @@ mod client;
 mod daemon;
 mod env;
 mod paths;
+mod portforward;
+mod proxy;
 mod registry;
 mod supervisor;
 
@@ -43,6 +45,8 @@ enum Cmd {
         #[arg(long)]
         tail: bool,
     },
+    /// Print the pf anchor and the sudo command to redirect :80 to the proxy port.
+    InstallPortForward,
 }
 
 #[tokio::main]
@@ -58,6 +62,7 @@ async fn main() -> ExitCode {
         Cmd::Restart { name } => client::restart(name).await,
         Cmd::Status { name } => client::status(name).await,
         Cmd::Logs { name, tail } => client::logs(name, tail).await,
+        Cmd::InstallPortForward => portforward::install(),
     };
 
     match result {
