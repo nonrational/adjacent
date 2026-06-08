@@ -200,6 +200,12 @@ async fn wait_ready(
 
 /// Periodic sweep: any app whose `last_request` is older than its `idle_timeout` gets stopped
 /// the same way `adj down` would. Apps with idle_timeout disabled are skipped.
+///
+/// The scanner snapshots candidates, releases the supervisor lock, then asks the supervisor
+/// to stop each one — but only after re-checking `last_request` under the lock. Without the
+/// re-check, a proxied request can land between snapshot and SIGTERM, see `Running` in the
+/// proxy's fast path, route to the about-to-be-killed process, and turn the shutdown into a
+/// spurious 502. `down_if_idle` returns `Ok(false)` in that case and the scanner moves on.
 async fn idle_scanner(supervisor: Arc<Supervisor>) {
     loop {
         tokio::time::sleep(IDLE_SCAN_INTERVAL).await;
@@ -212,8 +218,16 @@ async fn idle_scanner(supervisor: Arc<Supervisor>) {
                 tracing::info!(
                     "stopping `{name}` after {idle_for:?} idle (threshold {window:?})"
                 );
-                if let Err(err) = supervisor.down(&name).await {
-                    tracing::warn!("idle shutdown of `{name}` failed: {err}");
+                match supervisor.down_if_idle(&name, window).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::debug!(
+                            "skipped idle shutdown of `{name}` — request arrived after scan snapshot"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::warn!("idle shutdown of `{name}` failed: {err}");
+                    }
                 }
             }
         }
