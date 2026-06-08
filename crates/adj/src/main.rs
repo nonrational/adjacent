@@ -29,7 +29,11 @@ enum Cmd {
     /// Register an app from a directory containing adjacent.toml.
     Add { path: String },
     /// List registered apps and their state.
-    List,
+    List {
+        /// Emit a JSON array of `{name, path, state, port?}` instead of the human view.
+        #[arg(long)]
+        json: bool,
+    },
     /// Boot a registered app.
     Up { name: String },
     /// Stop a running app (SIGTERM, then SIGKILL after a grace period).
@@ -37,13 +41,21 @@ enum Cmd {
     /// Restart an app (down then up).
     Restart { name: String },
     /// Report the current state of an app.
-    Status { name: String },
+    Status {
+        name: String,
+        /// Emit a JSON object of `{name, path, state, port?, pid?, exit_code?, started_at?}`.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the log file for an app.
     Logs {
         name: String,
         /// Stream new log lines as they arrive (tail -F equivalent).
         #[arg(long)]
         tail: bool,
+        /// Emit one JSON object per line (`{ts, stream, line}`) instead of plain text.
+        #[arg(long)]
+        json: bool,
     },
     /// Print the pf anchor and the sudo command to redirect :80 to the proxy port.
     InstallPortForward,
@@ -56,12 +68,12 @@ async fn main() -> ExitCode {
     let result = match cli.cmd {
         Cmd::Daemon => daemon::run().await,
         Cmd::Add { path } => client::add(path).await,
-        Cmd::List => client::list().await,
+        Cmd::List { json } => client::list(json).await,
         Cmd::Up { name } => client::up(name).await,
         Cmd::Down { name } => client::down(name).await,
         Cmd::Restart { name } => client::restart(name).await,
-        Cmd::Status { name } => client::status(name).await,
-        Cmd::Logs { name, tail } => client::logs(name, tail).await,
+        Cmd::Status { name, json } => client::status(name, json).await,
+        Cmd::Logs { name, tail, json } => client::logs(name, tail, json).await,
         Cmd::InstallPortForward => portforward::install(),
     };
 
