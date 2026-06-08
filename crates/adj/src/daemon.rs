@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use adj_protocol::{AppSummary, Request, Response};
 use anyhow::{anyhow, Context, Result};
@@ -9,8 +10,14 @@ use tokio::sync::Mutex;
 
 use crate::paths;
 use crate::proxy;
+use crate::readiness::{wait_ready as readiness_wait, ReadinessError};
 use crate::registry::{self, Registry};
 use crate::supervisor::Supervisor;
+
+/// How often the idle scanner looks at the supervised apps to decide whether any should be
+/// stopped. The poll cost is tiny (one mutex lock per pass) so a short interval keeps the
+/// observable shutdown latency reasonable even for small `idle_timeout` values.
+const IDLE_SCAN_INTERVAL: Duration = Duration::from_millis(500);
 
 pub async fn run() -> Result<()> {
     tracing_subscriber::fmt()
@@ -55,6 +62,14 @@ pub async fn run() -> Result<()> {
         if let Err(err) = proxy::run(proxy_supervisor).await {
             tracing::error!("proxy listener exited: {err}");
         }
+    });
+
+    // Idle scanner: periodically stop apps whose last-routed-request is older than their
+    // configured idle_timeout. Chose a scan loop over per-app timers — no per-app timer state
+    // to manage, and the scan itself is one mutex acquisition every IDLE_SCAN_INTERVAL.
+    let idle_supervisor = supervisor.clone();
+    tokio::spawn(async move {
+        idle_scanner(idle_supervisor).await;
     });
 
     loop {
@@ -151,6 +166,57 @@ async fn dispatch(
         Request::Restart { name } => restart(name, supervisor).await,
         Request::Status { name } => status(name, supervisor).await,
         Request::LogPath { name } => log_path(name).await,
+        Request::WaitReady { name, timeout_secs } => wait_ready(name, timeout_secs, supervisor).await,
+    }
+}
+
+async fn wait_ready(
+    name: String,
+    timeout_secs: u64,
+    supervisor: Arc<Supervisor>,
+) -> Result<Response> {
+    let reg = Registry::load()?;
+    let entry = reg
+        .get(&name)
+        .ok_or_else(|| anyhow!("no app named `{}`", name))?
+        .clone();
+    let cfg = registry::read_app_config(&entry.path)?;
+    let timeout = if timeout_secs == 0 {
+        proxy::boot_timeout_for(&cfg)
+    } else {
+        Duration::from_secs(timeout_secs)
+    };
+    let deadline = tokio::time::Instant::now() + timeout;
+    match readiness_wait(&name, supervisor.as_ref(), &cfg, deadline).await {
+        Ok(_) => Ok(Response::Ok),
+        Err(ReadinessError::Timeout) => Err(anyhow!(
+            "app `{name}` did not become ready within {timeout:?}"
+        )),
+        Err(ReadinessError::Crashed { exit_code }) => Err(anyhow!(
+            "app `{name}` crashed while waiting for ready (exit {exit_code})"
+        )),
+    }
+}
+
+/// Periodic sweep: any app whose `last_request` is older than its `idle_timeout` gets stopped
+/// the same way `adj down` would. Apps with idle_timeout disabled are skipped.
+async fn idle_scanner(supervisor: Arc<Supervisor>) {
+    loop {
+        tokio::time::sleep(IDLE_SCAN_INTERVAL).await;
+        let candidates = supervisor.idle_candidates().await;
+        for (name, idle_for, idle_timeout) in candidates {
+            let Some(window) = idle_timeout else {
+                continue;
+            };
+            if idle_for >= window {
+                tracing::info!(
+                    "stopping `{name}` after {idle_for:?} idle (threshold {window:?})"
+                );
+                if let Err(err) = supervisor.down(&name).await {
+                    tracing::warn!("idle shutdown of `{name}` failed: {err}");
+                }
+            }
+        }
     }
 }
 

@@ -10,6 +10,10 @@ pub enum Request {
     Restart { name: String },
     Status { name: String },
     LogPath { name: String },
+    /// Block on the daemon until `name` reports ready (TCP-open, or 2xx from
+    /// `health_check_url` when configured). `timeout_secs == 0` means use the app's configured
+    /// `boot_timeout`.
+    WaitReady { name: String, timeout_secs: u64 },
     Ping,
 }
 

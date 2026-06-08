@@ -8,6 +8,7 @@ mod env;
 mod paths;
 mod portforward;
 mod proxy;
+mod readiness;
 mod registry;
 mod supervisor;
 
@@ -57,6 +58,14 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Block until an app reports ready (TCP-open or 2xx from health_check_url).
+    WaitReady {
+        name: String,
+        /// Override the per-app boot_timeout in seconds. `0` (the default) means use the app's
+        /// configured `boot_timeout`.
+        #[arg(long, default_value_t = 0)]
+        timeout: u64,
+    },
     /// Print the pf anchor and the sudo command to redirect :80 to the proxy port.
     InstallPortForward,
 }
@@ -74,6 +83,7 @@ async fn main() -> ExitCode {
         Cmd::Restart { name } => client::restart(name).await,
         Cmd::Status { name, json } => client::status(name, json).await,
         Cmd::Logs { name, tail, json } => client::logs(name, tail, json).await,
+        Cmd::WaitReady { name, timeout } => client::wait_ready(name, timeout).await,
         Cmd::InstallPortForward => portforward::install(),
     };
 

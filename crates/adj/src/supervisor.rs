@@ -3,7 +3,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use adj_protocol::{AppState, LogRecord, LogStream};
 use anyhow::{anyhow, Context, Result};
@@ -18,7 +18,7 @@ use tokio::time::sleep;
 
 use crate::env::load_env_file;
 use crate::paths;
-use crate::registry::AppConfig;
+use crate::registry::{idle_timeout_for, AppConfig};
 
 const TERM_GRACE: Duration = Duration::from_secs(5);
 const PORT_ALLOC_ATTEMPTS: usize = 32;
@@ -40,10 +40,16 @@ struct Inner {
 
 struct AppRuntime {
     state: AppState,
-    // Set when the daemon initiates termination (down, restart's down half). On exit, this
-    // means the process should be recorded as Stopped rather than Crashed even if the shell
-    // propagates the signal as a non-zero exit code.
+    // Set when the daemon initiates termination (down, restart's down half, idle scanner). On
+    // exit, this means the process should be recorded as Stopped rather than Crashed even if
+    // the shell propagates the signal as a non-zero exit code.
     intentional_stop: bool,
+    // Last time a proxied request was routed to this app, used by the idle scanner. Seeded at
+    // boot so a freshly-booted app gets its full idle window before being a stop candidate.
+    last_request: Instant,
+    // Idle window for this app. `None` means idle shutdown is disabled. Captured at boot time
+    // from the resolved config; we don't re-read adjacent.toml during the scan loop.
+    idle_timeout: Option<Duration>,
 }
 
 impl Supervisor {
@@ -154,6 +160,7 @@ impl Supervisor {
             .format(&Rfc3339)
             .unwrap_or_else(|_| String::new());
 
+        let idle_timeout = idle_timeout_for(&cfg);
         inner.apps.insert(
             name.clone(),
             AppRuntime {
@@ -167,6 +174,8 @@ impl Supervisor {
                     },
                 },
                 intentional_stop: false,
+                last_request: Instant::now(),
+                idle_timeout,
             },
         );
         // Detach the wait task so the supervisor can observe exit/crash without holding the lock.
@@ -269,6 +278,38 @@ impl Supervisor {
             "failed to terminate `{}` within grace window",
             name
         ))
+    }
+
+    /// Stamp `name`'s last-request timestamp. Called by the proxy on every routed request so
+    /// the idle scanner can tell which apps are quiet. A no-op for apps not currently running.
+    pub async fn touch_idle(&self, name: &str) {
+        let mut inner = self.inner.lock().await;
+        if let Some(rt) = inner.apps.get_mut(name) {
+            if matches!(rt.state, AppState::Running { .. }) {
+                rt.last_request = Instant::now();
+            }
+        }
+    }
+
+    /// Snapshot every running app's idle status. Returned tuples are `(name, idle_for)` —
+    /// callers compare against the app's configured `idle_timeout` to decide whether to stop.
+    pub async fn idle_candidates(&self) -> Vec<(String, Duration, Option<Duration>)> {
+        let inner = self.inner.lock().await;
+        let now = Instant::now();
+        inner
+            .apps
+            .iter()
+            .filter_map(|(name, rt)| {
+                if !matches!(rt.state, AppState::Running { .. }) {
+                    return None;
+                }
+                Some((
+                    name.clone(),
+                    now.saturating_duration_since(rt.last_request),
+                    rt.idle_timeout,
+                ))
+            })
+            .collect()
     }
 }
 
