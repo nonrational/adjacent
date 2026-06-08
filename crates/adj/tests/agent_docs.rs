@@ -93,3 +93,28 @@ async fn errors_when_manifest_missing() {
         "stderr should explain the missing manifest, got: {stderr}"
     );
 }
+
+#[tokio::test]
+async fn defaults_to_cwd_when_path_flag_omitted() {
+    let dir = TempDir::new().expect("tempdir");
+    write_manifest(dir.path(), "cwdapp", "node server.js").await;
+
+    let out = Command::new(adj_bin())
+        .arg("agent-instructions")
+        .current_dir(dir.path())
+        .output()
+        .await
+        .expect("agent-instructions");
+
+    assert!(
+        out.status.success(),
+        "agent-instructions failed: status={:?} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("cwdapp") && stdout.contains("node server.js"),
+        "stdout missing templated fields from CWD manifest: {stdout}"
+    );
+}
