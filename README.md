@@ -19,7 +19,7 @@ Homepage: [adj.ac/ent](https://adj.ac/ent)
 
 ## Status
 
-Pre-alpha. v1 is being sliced into tracer-bullet issues: [github.com/nonrational/adjacent/issues](https://github.com/nonrational/adjacent/issues).
+Coming soon. Work in progress: [github.com/nonrational/adjacent/issues](https://github.com/nonrational/adjacent/issues).
 
 ## Development
 

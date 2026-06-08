@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="A local dev-server harness for humans and AI agents to share.">
+  <meta name="description" content="A local dev-server harness for humans and agents to share.">
   <title>Adjacent</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -85,12 +85,12 @@
       <a href="https://github.com/nonrational/adjacent">github &rarr;</a>
     </header>
 
-    <h1 class="wordmark"><span class="a">adj</span><span class="slash">/</span><span class="b">ac.ent</span><small>local dev<br>harness</small></h1>
-    <p class="pitch">A local dev-server harness for <em>humans</em> and <em>AI agents</em> to share.</p>
+    <h1 class="wordmark"><span class="a">adj.ac</span><span class="slash">/</span><span class="b">ent</span></h1>
+    <p class="pitch">Local dev-server harness for <em>humans</em> and <em>agents</em>.</p>
 
     <section class="framing">
       <div class="label">the problem</div>
-      <p>You and your AI agent fight over the same dev server. One side starts it; the other side restarts it; logs disappear; nobody knows what's running.</p>
+      <p>You and your agent fight over the same dev server. One side starts it; the other side restarts it; logs disappear; nobody knows what's running.</p>
       <p><strong>Adjacent owns the process</strong> so neither side has to. Hit <span style="color:var(--accent)">foo.adj.ac</span>, the app boots if it's down, the request proxies through. Same surface for humans and agents.</p>
     </section>
 
@@ -98,19 +98,19 @@
       <div class="label">shape</div>
 <pre class="diagram">  <b>developer</b>  ─┐
                  ├──&gt;  <b>adj</b>  ──&gt;  foo.adj.ac  ──&gt;  your app
-  <b>agent</b>      ─┘     (one supervisor, shared logs, lazy boot)</pre>
+  <b>agent</b>      ─┘</pre>
     </section>
 
     <section>
       <div class="label">quickstart</div>
-      <code class="cmd"><span class="prompt">$</span>brew install adjacent<span class="note"># formula coming soon</span></code>
-      <code class="cmd"><span class="prompt">$</span>adj add ./my-app<span class="note"># registers, no implicit defaults</span></code>
-      <code class="cmd"><span class="prompt">$</span>curl my-app.adj.ac<span class="note"># lazy-boots on first request</span></code>
+      <code class="cmd"><span class="prompt">$</span>brew install adjacent</code>
+      <code class="cmd"><span class="prompt">$</span>adj add ./my-app</code>
+      <code class="cmd"><span class="prompt">$</span>curl my-app.adj.ac</code>
     </section>
 
     <section>
       <div class="label">status</div>
-      <p style="color: var(--dim); max-width: 56ch;">Pre-alpha. v1 is being sliced into tracer-bullet issues. Built in Rust. Runs as a user-level launchd job. <strong style="color: var(--paper); font-weight: 500;">Never runs as root.</strong></p>
+      <p style="color: var(--dim); max-width: 56ch;">Coming soon. Built in Rust. <strong style="color: var(--paper); font-weight: 500;">Never runs as root.</strong></p>
     </section>
 
     <footer>
