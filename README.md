@@ -57,4 +57,15 @@ idle_timeout = "30m"          # stop after no requests (default "15m", or "off")
 
 Then `curl -H 'Host: site.adj.ac' http://127.0.0.1:8080/` lazy-boots the app and proxies through. Full `--json` output schema in [`crates/adj/JSON.md`](crates/adj/JSON.md).
 
+## Telling agents about `adj`
+
+When a coding agent runs in a directory with `adjacent.toml`, it needs to know to use `adj` instead of starting the dev server itself. `adj agent-instructions` prints a markdown steering doc — pipe it into the agent's instructions file:
+
+```sh
+cd path/to/your/app
+adj agent-instructions >> CLAUDE.md   # or AGENTS.md
+```
+
+The doc names the app, names the dev command the agent should not run, and lists the `adj` subcommands the agent should use to read state, restart, and verify changes.
+
 The landing page sources live in `ent/`; `just serve` runs `npx live-server` against it.
