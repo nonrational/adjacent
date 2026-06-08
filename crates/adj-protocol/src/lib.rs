@@ -35,7 +35,7 @@ pub struct AppSummary {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AppState {
     Stopped,
-    Running { pid: u32 },
+    Running { pid: u32, port: u16 },
     Crashed { exit_code: i32 },
 }
 
@@ -43,7 +43,7 @@ impl std::fmt::Display for AppState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AppState::Stopped => write!(f, "stopped"),
-            AppState::Running { pid } => write!(f, "running (pid {pid})"),
+            AppState::Running { pid, port } => write!(f, "running (pid {pid}, port {port})"),
             AppState::Crashed { exit_code } => write!(f, "crashed (exit {exit_code})"),
         }
     }

@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -16,6 +17,7 @@ use crate::paths;
 use crate::registry::AppConfig;
 
 const TERM_GRACE: Duration = Duration::from_secs(5);
+const PORT_ALLOC_ATTEMPTS: usize = 32;
 
 #[derive(Default)]
 pub struct Supervisor {
@@ -25,6 +27,11 @@ pub struct Supervisor {
 #[derive(Default)]
 struct Inner {
     apps: HashMap<String, AppRuntime>,
+    // Ports we've handed to a supervised child that may not yet have bound them. We hold the
+    // supervisor mutex around alloc + spawn, but the kernel can re-issue a just-freed port
+    // before the child binds. Tracking reserved ports lets us retry the :0 probe and avoid
+    // collisions between Adjacent-supervised processes.
+    reserved_ports: HashSet<u16>,
 }
 
 struct AppRuntime {
@@ -58,6 +65,12 @@ impl Supervisor {
             }
         }
 
+        // Defer reserving the port until after all the fallible-but-fast pre-spawn work
+        // succeeds. The supervisor mutex serializes alloc+spawn, so nothing else can claim the
+        // same port between `allocate_free_port` and the eventual `insert` below — this avoids
+        // leaking a reservation if log-file setup fails.
+        let port = allocate_free_port(&inner.reserved_ports)?;
+
         let log_path = paths::log_path(&name)?;
         paths::ensure_dirs()?;
         let log_file = std::fs::OpenOptions::new()
@@ -69,11 +82,13 @@ impl Supervisor {
             .try_clone()
             .context("cloning log file handle for stderr")?;
 
+        let port_env = cfg.port_env.as_deref().unwrap_or("PORT");
         let mut command = Command::new("sh");
         command
             .arg("-c")
             .arg(&cfg.cmd)
             .current_dir(&app_dir)
+            .env(port_env, port.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(stderr_file));
@@ -81,18 +96,31 @@ impl Supervisor {
         // the whole tree on stop. Without this, SIGTERM/SIGKILL hit only `sh` and the real
         // long-running command (e.g. a dev server) is reparented to init and keeps the port.
         command.process_group(0);
-        let mut child = command
-            .spawn()
-            .with_context(|| format!("spawning `{}`", cfg.cmd))?;
 
-        let pid = child
-            .id()
-            .ok_or_else(|| anyhow!("spawned child has no pid"))?;
+        // Reserve the port immediately before spawn. Past this point, every error path must
+        // release the reservation so it doesn't outlive the would-be child.
+        inner.reserved_ports.insert(port);
+
+        let mut child = match command.spawn() {
+            Ok(c) => c,
+            Err(err) => {
+                inner.reserved_ports.remove(&port);
+                return Err(anyhow::Error::from(err).context(format!("spawning `{}`", cfg.cmd)));
+            }
+        };
+
+        let pid = match child.id() {
+            Some(p) => p,
+            None => {
+                inner.reserved_ports.remove(&port);
+                return Err(anyhow!("spawned child has no pid"));
+            }
+        };
 
         inner.apps.insert(
             name.clone(),
             AppRuntime {
-                state: AppState::Running { pid },
+                state: AppState::Running { pid, port },
                 intentional_stop: false,
             },
         );
@@ -135,6 +163,9 @@ impl Supervisor {
                 // Reset the flag so a subsequent crash (no `down`) reports Crashed correctly.
                 rt.intentional_stop = false;
             }
+            // Release the port reservation regardless of how the process ended; the child has
+            // exited so the kernel will not hand the same port to anything still bound here.
+            guard.reserved_ports.remove(&port);
         });
 
         Ok(pid)
@@ -148,7 +179,7 @@ impl Supervisor {
                 .get_mut(name)
                 .ok_or_else(|| anyhow!("app `{}` is not running", name))?;
             let pid = match rt.state {
-                AppState::Running { pid } => pid,
+                AppState::Running { pid, .. } => pid,
                 _ => return Err(anyhow!("app `{}` is not running", name)),
             };
             // Flag the upcoming exit as intentional so the wait task records Stopped, not Crashed.
@@ -190,4 +221,30 @@ impl Supervisor {
             name
         ))
     }
+}
+
+// Ask the kernel for a free TCP port by binding `:0` on the loopback, then close the listener
+// and hand the number to the child. There's a small race window between close and the child
+// binding — the kernel could in principle reissue the same port to a concurrent allocation.
+// Two mitigations:
+//   1. The supervisor mutex serializes alloc+spawn across `up` calls.
+//   2. `reserved_ports` remembers ports still associated with a supervised child so a follow-up
+//      :0 probe that happens to draw the same number retries.
+fn allocate_free_port(reserved: &HashSet<u16>) -> Result<u16> {
+    for _ in 0..PORT_ALLOC_ATTEMPTS {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .context("binding 127.0.0.1:0 to discover a free port")?;
+        let port = listener
+            .local_addr()
+            .context("reading local_addr of probe listener")?
+            .port();
+        drop(listener);
+        if !reserved.contains(&port) {
+            return Ok(port);
+        }
+    }
+    Err(anyhow!(
+        "could not find a free port not already reserved by Adjacent after {} attempts",
+        PORT_ALLOC_ATTEMPTS
+    ))
 }
