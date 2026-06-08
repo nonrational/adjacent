@@ -46,24 +46,13 @@ pub async fn run() -> Result<()> {
     let supervisor = Arc::new(Supervisor::new());
     let registry_lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
 
-    // Best-effort cleanup of the socket on shutdown signals so subsequent boots aren't blocked.
-    // SIGTERM matters specifically for `brew services stop` / launchd-driven shutdown; SIGINT
-    // covers interactive Ctrl-C in the foreground. Either signal triggers the same cleanup.
+    // Best-effort cleanup of the socket on Ctrl-C so subsequent boots aren't blocked.
     let socket_for_signal = socket.clone();
     tokio::spawn(async move {
-        let mut sigterm = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(s) => s,
-            Err(err) => {
-                tracing::warn!("failed to install SIGTERM handler: {err}");
-                return;
-            }
-        };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = sigterm.recv() => {}
+        if tokio::signal::ctrl_c().await.is_ok() {
+            let _ = std::fs::remove_file(&socket_for_signal);
+            std::process::exit(0);
         }
-        let _ = std::fs::remove_file(&socket_for_signal);
-        std::process::exit(0);
     });
 
     // Reverse proxy runs in the same process as the control-plane listener; failures here are
@@ -72,6 +61,16 @@ pub async fn run() -> Result<()> {
     tokio::spawn(async move {
         if let Err(err) = proxy::run(proxy_supervisor).await {
             tracing::error!("proxy listener exited: {err}");
+        }
+    });
+
+    // HTTPS listener is best-effort: the user might not have run `adj install-ca` yet, the CA
+    // files might be unreadable, or the high port might be taken. Any of those degrade the
+    // daemon to HTTP-only rather than killing it — same posture as the HTTP proxy task above.
+    let https_supervisor = supervisor.clone();
+    tokio::spawn(async move {
+        if let Err(err) = proxy::run_https(https_supervisor).await {
+            tracing::error!("https listener exited: {err}");
         }
     });
 
