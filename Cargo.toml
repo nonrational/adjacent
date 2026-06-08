@@ -30,3 +30,7 @@ hyper-util = { version = "0.1", features = ["tokio", "server", "client", "client
 http-body-util = "0.1"
 bytes = "1"
 time = { version = "0.3", features = ["formatting", "serde-well-known", "macros"] }
+rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+rustls = "0.23"
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
