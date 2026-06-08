@@ -46,13 +46,24 @@ pub async fn run() -> Result<()> {
     let supervisor = Arc::new(Supervisor::new());
     let registry_lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
 
-    // Best-effort cleanup of the socket on Ctrl-C so subsequent boots aren't blocked.
+    // Best-effort cleanup of the socket on shutdown signals so subsequent boots aren't blocked.
+    // SIGTERM matters specifically for `brew services stop` / launchd-driven shutdown; SIGINT
+    // covers interactive Ctrl-C in the foreground. Either signal triggers the same cleanup.
     let socket_for_signal = socket.clone();
     tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            let _ = std::fs::remove_file(&socket_for_signal);
-            std::process::exit(0);
+        let mut sigterm = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(err) => {
+                tracing::warn!("failed to install SIGTERM handler: {err}");
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
         }
+        let _ = std::fs::remove_file(&socket_for_signal);
+        std::process::exit(0);
     });
 
     // Reverse proxy runs in the same process as the control-plane listener; failures here are
