@@ -338,14 +338,14 @@ async fn wait_ready_blocks_until_app_is_ready() {
 }
 
 #[tokio::test]
-async fn wait_ready_exits_nonzero_on_timeout() {
+async fn wait_ready_fails_fast_when_app_not_running() {
+    // `adj wait-ready` on a registered-but-never-booted app used to sit out the full
+    // boot_timeout (60s default) polling connection-refused. Fail fast instead with a message
+    // that points the user at `adj up`.
     let mut sandbox = Sandbox::new().await;
     sandbox.start_daemon().await;
 
     let app_dir = TempDir::new().expect("app dir");
-    // Reuse the slow-boot strategy from the proxy tests: a process that runs but never binds
-    // its port. wait-ready against an app that has never been started will time out because
-    // its state is Stopped throughout.
     write_manifest(
         app_dir.path(),
         "name = \"nope\"\ncmd = \"sleep 60\"\nboot_timeout = 60\n",
@@ -365,7 +365,7 @@ async fn wait_ready_exits_nonzero_on_timeout() {
         .arg("wait-ready")
         .arg("nope")
         .arg("--timeout")
-        .arg("1")
+        .arg("5")
         .output()
         .await
         .expect("wait-ready");
@@ -377,12 +377,12 @@ async fn wait_ready_exits_nonzero_on_timeout() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("did not become ready") || stderr.contains("ready"),
-        "expected timeout message, got: {stderr}"
+        stderr.contains("is not running") && stderr.contains("adj up"),
+        "expected actionable not-running message, got: {stderr}"
     );
     assert!(
-        elapsed < Duration::from_secs(5),
-        "wait-ready --timeout 1 took {elapsed:?}"
+        elapsed < Duration::from_secs(2),
+        "wait-ready on a stopped app should return nearly instantly, took {elapsed:?}"
     );
 
     sandbox.stop_daemon().await;

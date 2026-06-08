@@ -181,6 +181,17 @@ async fn wait_ready(
         .ok_or_else(|| anyhow!("no app named `{}`", name))?
         .clone();
     let cfg = registry::read_app_config(&entry.path)?;
+    // Fail fast if the app isn't running yet. Without this, the poll loop in `readiness::wait_ready`
+    // sits on connection-refused until `boot_timeout` (60s default) and the user gets no signal
+    // that they were supposed to `adj up` first.
+    match supervisor.state(&name).await {
+        adj_protocol::AppState::Running { .. } => {}
+        adj_protocol::AppState::Stopped | adj_protocol::AppState::Crashed { .. } => {
+            return Err(anyhow!(
+                "app `{name}` is not running; run `adj up {name}` first"
+            ));
+        }
+    }
     let timeout = if timeout_secs == 0 {
         proxy::boot_timeout_for(&cfg)
     } else {
