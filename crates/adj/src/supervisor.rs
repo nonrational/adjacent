@@ -65,8 +65,11 @@ impl Supervisor {
             }
         }
 
+        // Defer reserving the port until after all the fallible-but-fast pre-spawn work
+        // succeeds. The supervisor mutex serializes alloc+spawn, so nothing else can claim the
+        // same port between `allocate_free_port` and the eventual `insert` below — this avoids
+        // leaking a reservation if log-file setup fails.
         let port = allocate_free_port(&inner.reserved_ports)?;
-        inner.reserved_ports.insert(port);
 
         let log_path = paths::log_path(&name)?;
         paths::ensure_dirs()?;
@@ -93,6 +96,11 @@ impl Supervisor {
         // the whole tree on stop. Without this, SIGTERM/SIGKILL hit only `sh` and the real
         // long-running command (e.g. a dev server) is reparented to init and keeps the port.
         command.process_group(0);
+
+        // Reserve the port immediately before spawn. Past this point, every error path must
+        // release the reservation so it doesn't outlive the would-be child.
+        inner.reserved_ports.insert(port);
+
         let mut child = match command.spawn() {
             Ok(c) => c,
             Err(err) => {
