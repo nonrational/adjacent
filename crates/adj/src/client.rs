@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use adj_protocol::{Request, Response};
+use adj_protocol::{ListEntryDto, LogRecord, Request, Response, StatusDto};
 use anyhow::{anyhow, Context, Result};
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -63,9 +63,22 @@ pub async fn add(path: String) -> Result<()> {
     Ok(())
 }
 
-pub async fn list() -> Result<()> {
+pub async fn list(json: bool) -> Result<()> {
     let resp = into_error(request(Request::List).await?)?;
     if let Response::List { entries } = resp {
+        if json {
+            let dtos: Vec<ListEntryDto> = entries
+                .iter()
+                .map(|e| ListEntryDto {
+                    name: &e.name,
+                    path: &e.path,
+                    state: &e.state,
+                })
+                .collect();
+            let out = serde_json::to_string(&dtos)?;
+            println!("{out}");
+            return Ok(());
+        }
         if entries.is_empty() {
             println!("no apps registered");
             return Ok(());
@@ -95,7 +108,27 @@ pub async fn restart(name: String) -> Result<()> {
     Ok(())
 }
 
-pub async fn status(name: String) -> Result<()> {
+pub async fn status(name: String, json: bool) -> Result<()> {
+    if json {
+        // For `--json` we need the app's registered path too. The List response carries it;
+        // a single extra request keeps the protocol surface unchanged.
+        let list_resp = into_error(request(Request::List).await?)?;
+        let Response::List { entries } = list_resp else {
+            return Err(anyhow!("unexpected response from daemon"));
+        };
+        let entry = entries
+            .iter()
+            .find(|e| e.name == name)
+            .ok_or_else(|| anyhow!("no app named `{}`", name))?;
+        let dto = StatusDto {
+            name: &entry.name,
+            path: &entry.path,
+            state: &entry.state,
+        };
+        let out = serde_json::to_string(&dto)?;
+        println!("{out}");
+        return Ok(());
+    }
     let resp = into_error(request(Request::Status { name }).await?)?;
     if let Response::Status { name, state } = resp {
         println!("{name}: {state}");
@@ -103,7 +136,7 @@ pub async fn status(name: String) -> Result<()> {
     Ok(())
 }
 
-pub async fn logs(name: String, tail: bool) -> Result<()> {
+pub async fn logs(name: String, tail: bool, json: bool) -> Result<()> {
     let resp = into_error(request(Request::LogPath { name: name.clone() }).await?)?;
     let Response::LogPath { path } = resp else {
         return Err(anyhow!("unexpected response from daemon"));
@@ -126,14 +159,61 @@ pub async fn logs(name: String, tail: bool) -> Result<()> {
             ));
         }
     }
-    if tail {
-        tail_file(&path).await
-    } else {
-        print_file(&path).await
+    match (tail, json) {
+        (false, false) => print_file_plain(&path).await,
+        (true, false) => tail_file_plain(&path).await,
+        (false, true) => print_file_json(&path).await,
+        (true, true) => tail_file_json(&path).await,
     }
 }
 
-async fn print_file(path: &Path) -> Result<()> {
+// In plain-text mode we project each JSONL record's `line` field. Lines that don't parse
+// (e.g. legacy logs written before this slice landed) are passed through verbatim so users
+// don't lose data during the transition.
+async fn print_file_plain(path: &Path) -> Result<()> {
+    let file = File::open(path)
+        .await
+        .with_context(|| format!("opening {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut stdout = tokio::io::stdout();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line).await?;
+        if n == 0 {
+            break;
+        }
+        emit_plain_line(&line, &mut stdout).await?;
+    }
+    stdout.flush().await?;
+    Ok(())
+}
+
+async fn tail_file_plain(path: &Path) -> Result<()> {
+    let file = File::open(path)
+        .await
+        .with_context(|| format!("opening {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut stdout = tokio::io::stdout();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await? {
+            0 => {
+                stdout.flush().await?;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            _ => {
+                emit_plain_line(&line, &mut stdout).await?;
+                stdout.flush().await?;
+            }
+        }
+    }
+}
+
+// In JSON mode we stream the file's contents as-is. The supervisor already writes valid
+// JSONL records, so callers can pipe directly into `jq` or any JSONL parser.
+async fn print_file_json(path: &Path) -> Result<()> {
     let mut file = File::open(path)
         .await
         .with_context(|| format!("opening {}", path.display()))?;
@@ -150,7 +230,7 @@ async fn print_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn tail_file(path: &Path) -> Result<()> {
+async fn tail_file_json(path: &Path) -> Result<()> {
     let mut file = File::open(path)
         .await
         .with_context(|| format!("opening {}", path.display()))?;
@@ -159,20 +239,34 @@ async fn tail_file(path: &Path) -> Result<()> {
     loop {
         let n = file.read(&mut buf).await?;
         if n == 0 {
-            break;
-        }
-        stdout.write_all(&buf[..n]).await?;
-    }
-    stdout.flush().await?;
-
-    // Poll for new content. Simple and dependency-free; sufficient for v1.
-    loop {
-        let n = file.read(&mut buf).await?;
-        if n == 0 {
+            stdout.flush().await?;
             tokio::time::sleep(Duration::from_millis(200)).await;
             continue;
         }
         stdout.write_all(&buf[..n]).await?;
         stdout.flush().await?;
     }
+}
+
+async fn emit_plain_line<W>(raw_line: &str, out: &mut W) -> Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    // Try to parse as our JSONL record; on failure, write the line verbatim. This makes the
+    // plain view degrade gracefully if a log file mixes record formats.
+    let trimmed = raw_line.trim_end_matches(['\r', '\n']);
+    if trimmed.is_empty() {
+        out.write_all(b"\n").await?;
+        return Ok(());
+    }
+    if let Ok(record) = serde_json::from_str::<LogRecord>(trimmed) {
+        out.write_all(record.line.as_bytes()).await?;
+        out.write_all(b"\n").await?;
+    } else {
+        out.write_all(raw_line.as_bytes()).await?;
+        if !raw_line.ends_with('\n') {
+            out.write_all(b"\n").await?;
+        }
+    }
+    Ok(())
 }
