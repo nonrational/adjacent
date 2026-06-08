@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 
 mod client;
 mod daemon;
+mod env;
 mod paths;
 mod registry;
 mod supervisor;
