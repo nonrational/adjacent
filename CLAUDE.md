@@ -75,7 +75,14 @@ Path canonicalization happens **client-side** in `add` — the daemon refuses no
 
 ### Privileged ops
 
-`adj install-port-forward` prints (never runs) a `pfctl` anchor and the sudo commands to redirect `:80 → :8080`. The daemon listens on a high port always; this is the only way `:80` reaches it. Hard rule: the daemon never executes as root.
+The daemon never executes as root. Privileged work is emitted as commands the user reviews and sudos.
+
+- `adj install-port-forward` — prints (never runs) a `pfctl` anchor with two `rdr` rules: `:80 → :8080` and `:443 → :8443`. The daemon listens on high ports always; this is how `:80` / `:443` reach it.
+- `adj install-ca` — generates a local CA at `~/.adjacent/ca.{crt,key}` (mode 0600 on the key) and prints the `security add-trusted-cert` command. The daemon issues a wildcard `*.adj.ac` leaf signed by the CA on next start; rotating the CA deletes the cached leaf so a fresh one re-issues.
+
+### HTTPS listener
+
+Alongside the HTTP proxy, the daemon opens an HTTPS listener on `:8443` (override `ADJACENT_HTTPS_PORT`). Both share the same request routing — the per-connection serve loop is generic over the stream type. Startup is best-effort: if the CA isn't on disk yet, the HTTPS task logs at `error!` and exits while HTTP and the control plane keep serving. Run `adj install-ca` to opt in.
 
 ## Conventions
 

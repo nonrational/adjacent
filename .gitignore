@@ -17,3 +17,5 @@ node_modules/
 # Local Adjacent state should never be committed
 .adjacent/
 *.env.local
+
+.claude/worktrees
