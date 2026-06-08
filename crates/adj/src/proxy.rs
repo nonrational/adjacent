@@ -230,13 +230,8 @@ async fn ensure_running(
     supervisor: Arc<Supervisor>,
     gate: Arc<BootGate>,
 ) -> Result<u16, ProxyError> {
-    // Fast path: already running. Skip taking the per-name lock to avoid head-of-line blocking
-    // when the app is hot.
-    if let AppState::Running { port, .. } = supervisor.state(name).await {
-        return Ok(port);
-    }
-
-    // Look up the registered path/config once outside the lock; needed for the boot path.
+    // Look up the registered path/config once outside the lock; needed for the boot path and
+    // to surface NotRegistered without taking the per-name lock.
     let reg = Registry::load().map_err(ProxyError::Other)?;
     let entry = match reg.get(name) {
         Some(e) => e.clone(),
@@ -252,19 +247,23 @@ async fn ensure_running(
         )));
     }
 
-    // Single-flight: serialize concurrent boot attempts for this name. The first holder runs the
-    // boot; later holders re-check state under the lock and find Running.
+    // Single-flight: serialize boot attempts for this name. The first holder runs the boot;
+    // later holders find the app Running on re-check and skip straight to wait_ready, which
+    // confirms the upstream is actually accepting before returning a port.
+    //
+    // We intentionally do NOT short-circuit on a Running state outside the lock. The supervisor
+    // flips state to Running the moment it spawns the child — before the child has bound its
+    // port. A second concurrent first-request that observed Running here and skipped wait_ready
+    // would forward to a port that wasn't accepting yet and get back a spurious 502. See #28.
     let name_lock = gate.lock_for(name).await;
     let _guard = name_lock.lock().await;
 
-    if let AppState::Running { port, .. } = supervisor.state(name).await {
-        return Ok(port);
+    if !matches!(supervisor.state(name).await, AppState::Running { .. }) {
+        supervisor
+            .up(entry.path.clone(), cfg.clone())
+            .await
+            .map_err(ProxyError::Other)?;
     }
-
-    supervisor
-        .up(entry.path.clone(), cfg.clone())
-        .await
-        .map_err(ProxyError::Other)?;
 
     let boot_timeout = boot_timeout_for(&cfg);
     let deadline = tokio::time::Instant::now() + boot_timeout;
