@@ -13,6 +13,7 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
+use crate::env::load_env_file;
 use crate::paths;
 use crate::registry::AppConfig;
 
@@ -65,6 +66,15 @@ impl Supervisor {
             }
         }
 
+        // Resolve env layers before any port allocation so a missing `env_file` or unreadable
+        // file fails fast with a clear error (and doesn't leak a port reservation).
+        let env_file_values = if let Some(rel) = cfg.env_file.as_deref() {
+            let resolved = app_dir.join(rel);
+            Some(load_env_file(&resolved)?)
+        } else {
+            None
+        };
+
         // Defer reserving the port until after all the fallible-but-fast pre-spawn work
         // succeeds. The supervisor mutex serializes alloc+spawn, so nothing else can claim the
         // same port between `allocate_free_port` and the eventual `insert` below — this avoids
@@ -88,10 +98,24 @@ impl Supervisor {
             .arg("-c")
             .arg(&cfg.cmd)
             .current_dir(&app_dir)
-            .env(port_env, port.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(stderr_file));
+
+        // Layer env in the order documented in adjacent.toml: env_file values first, then the
+        // committed `[env]` table overrides them, then PORT injection wins over both. The child
+        // also inherits the daemon's env by default; explicit `.env(k, v)` calls override per-key.
+        if let Some(values) = &env_file_values {
+            for (k, v) in values {
+                command.env(k, v);
+            }
+        }
+        if let Some(values) = &cfg.env {
+            for (k, v) in values {
+                command.env(k, v);
+            }
+        }
+        command.env(port_env, port.to_string());
         // Put the shell and everything it spawns in its own process group so we can signal
         // the whole tree on stop. Without this, SIGTERM/SIGKILL hit only `sh` and the real
         // long-running command (e.g. a dev server) is reparented to init and keeps the port.
