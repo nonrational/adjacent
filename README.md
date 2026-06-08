@@ -1,6 +1,6 @@
 # Adjacent
 
-A local dev-server harness so a developer and an AI coding agent can share one supervised server instance instead of fighting for control of the process.
+A local dev-server harness so a human developer and an agent developer can share one supervised server instance instead of fighting for control of the process.
 
 When both sides need the same local server running, they evict each other. The agent takes over → the developer loses log visibility. The developer reclaims it → the agent can't validate its work. Adjacent owns the process so neither side has to.
 
