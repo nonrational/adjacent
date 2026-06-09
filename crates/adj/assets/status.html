@@ -76,6 +76,7 @@
     }
     .app.is-running .glyph { color: var(--accent); }
     .app.is-crashed .glyph { color: var(--crashed); }
+    .app.is-missing .glyph { color: var(--accent-dim); }
 
     .app .name {
       grid-column: 2;
@@ -98,6 +99,7 @@
     .app .meta .state { color: var(--paper); }
     .app.is-running .meta .state { color: var(--accent); }
     .app.is-crashed .meta .state { color: var(--crashed); }
+    .app.is-missing .meta .state { color: var(--accent-dim); }
     .app .meta .port { color: var(--accent-dim); margin-left: 0.75rem; }
     .app .meta .time { color: var(--dim); margin-left: 0.75rem; }
 
@@ -109,6 +111,10 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }
+    .app.is-missing .path {
+      text-decoration: line-through;
+      text-decoration-color: var(--rule);
     }
 
     .empty {
@@ -206,6 +212,7 @@
     function glyphFor(state) {
       if (state === 'running') return '●';   // ●
       if (state === 'crashed') return '✗';   // ✗
+      if (state === 'missing') return '?';   // ? path no longer on disk
       return '○';                            // ○ stopped
     }
 
@@ -224,6 +231,7 @@
         const row = rowFor(app.name);
         row.classList.toggle('is-running', app.state === 'running');
         row.classList.toggle('is-crashed', app.state === 'crashed');
+        row.classList.toggle('is-missing', app.state === 'missing');
 
         setText(row.querySelector('.glyph'), glyphFor(app.state));
 

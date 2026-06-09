@@ -1,11 +1,13 @@
 use std::convert::Infallible;
+use std::path::Path;
 use std::sync::Arc;
 
-use adj_protocol::{AppSummary, StatusDto};
+use adj_protocol::{AppState, AppSummary};
 use bytes::Bytes;
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::body::Incoming;
 use hyper::{Method, Request, Response, StatusCode};
+use serde::Serialize;
 
 use crate::registry::Registry;
 use crate::supervisor::Supervisor;
@@ -46,14 +48,7 @@ async fn apps_json(
             return text_response(StatusCode::INTERNAL_SERVER_ERROR, "snapshot failed\n");
         }
     };
-    let dtos: Vec<StatusDto> = entries
-        .iter()
-        .map(|e| StatusDto {
-            name: &e.name,
-            path: &e.path,
-            state: &e.state,
-        })
-        .collect();
+    let dtos: Vec<DashboardEntry> = entries.iter().map(dashboard_entry).collect();
     let body = match serde_json::to_vec(&dtos) {
         Ok(b) => b,
         Err(err) => {
@@ -67,6 +62,77 @@ async fn apps_json(
         body,
         head_only,
     )
+}
+
+/// Dashboard-only wire shape for `/apps.json`. Diverges from the public
+/// `adj list --json` / `adj status --json` contracts (which freeze on `stopped`/`running`/
+/// `crashed`) by introducing a synthetic `"missing"` state when the registered path is gone.
+/// The page surfaces this so a registry that's drifted away from disk is visible at a glance.
+#[derive(Serialize)]
+struct DashboardEntry<'a> {
+    name: &'a str,
+    path: &'a str,
+    state: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    started_at: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_code: Option<i32>,
+}
+
+fn dashboard_entry(e: &AppSummary) -> DashboardEntry<'_> {
+    // `path.exists()` is a metadata stat under the hood — if the registry has drifted away from
+    // disk (the user moved or deleted the app directory) the row should make that obvious rather
+    // than silently reporting `stopped`. Override the displayed state to `"missing"` regardless
+    // of the supervisor's view: even a Running app whose path has vanished can't be restarted,
+    // and surfacing the inconsistency is more useful than hiding it behind the live state.
+    if !Path::new(e.path.as_str()).exists() {
+        return DashboardEntry {
+            name: &e.name,
+            path: &e.path,
+            state: "missing",
+            port: None,
+            pid: None,
+            started_at: None,
+            exit_code: None,
+        };
+    }
+    match &e.state {
+        AppState::Stopped => DashboardEntry {
+            name: &e.name,
+            path: &e.path,
+            state: "stopped",
+            port: None,
+            pid: None,
+            started_at: None,
+            exit_code: None,
+        },
+        AppState::Running {
+            pid,
+            port,
+            started_at,
+        } => DashboardEntry {
+            name: &e.name,
+            path: &e.path,
+            state: "running",
+            port: Some(*port),
+            pid: Some(*pid),
+            started_at: started_at.as_deref(),
+            exit_code: None,
+        },
+        AppState::Crashed { exit_code } => DashboardEntry {
+            name: &e.name,
+            path: &e.path,
+            state: "crashed",
+            port: None,
+            pid: None,
+            started_at: None,
+            exit_code: Some(*exit_code),
+        },
+    }
 }
 
 /// Snapshot the registry and query the supervisor for each app's state. Mirrors `daemon::list`'s

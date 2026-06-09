@@ -221,6 +221,50 @@ async fn status_subdomain_returns_404_for_unknown_path() {
 }
 
 #[tokio::test]
+async fn status_apps_json_marks_vanished_path_as_missing() {
+    let mut sandbox = Sandbox::new().await;
+    sandbox.start_daemon().await;
+
+    let app_dir = TempDir::new().expect("app dir");
+    write_app(app_dir.path(), "ghost", "sleep 30").await;
+    let add = sandbox
+        .cmd()
+        .arg("add")
+        .arg(app_dir.path())
+        .output()
+        .await
+        .expect("add");
+    assert!(add.status.success(), "add: {:?}", add);
+
+    // Delete the directory underneath the registry entry. TempDir's destructor recursively
+    // removes the directory on drop, so the canonical path the registry holds is now gone.
+    drop(app_dir);
+
+    let proxy_port = sandbox.proxy_port;
+    let (status_line, _headers, body) = tokio::task::spawn_blocking(move || {
+        http_get(proxy_port, "status.adj.ac", "/apps.json")
+    })
+    .await
+    .expect("join")
+    .expect("http_get");
+
+    assert!(status_line.contains(" 200 "), "expected 200: {status_line}");
+    let parsed: serde_json::Value =
+        serde_json::from_str(body.trim()).expect("apps.json must be valid JSON");
+    let arr = parsed.as_array().expect("apps.json must be an array");
+    let ghost = arr
+        .iter()
+        .find(|e| e["name"] == "ghost")
+        .expect("ghost entry should be present");
+    assert_eq!(
+        ghost["state"], "missing",
+        "expected state=missing for vanished path, got: {ghost}"
+    );
+
+    sandbox.stop_daemon().await;
+}
+
+#[tokio::test]
 async fn adj_add_refuses_to_register_reserved_name() {
     let mut sandbox = Sandbox::new().await;
     sandbox.start_daemon().await;
