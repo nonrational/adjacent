@@ -100,6 +100,17 @@ mod imp {
             KeyPair::from_remote(Box::new(self))
                 .map_err(|e| anyhow!("constructing rcgen KeyPair from Keychain handle: {e}"))
         }
+
+        /// Sign a fixed canary buffer with the keychain key. Used by `adj doctor` to confirm the
+        /// current binary's cdhash satisfies the key's ACL. `SecKeyCreateSignature` exercises a
+        /// different auth path than `SecKeyCopyExternalRepresentation`, so a "load" success does
+        /// not guarantee "sign" success — this gives the doctor a true end-to-end signing probe.
+        pub fn sign_canary(&self) -> Result<()> {
+            self.private
+                .create_signature(Algorithm::ECDSASignatureMessageX962SHA256, b"adj-doctor-canary")
+                .map(|_| ())
+                .map_err(|e| anyhow!("keychain sign canary failed: {e}"))
+        }
     }
 
     impl RemoteKeyPair for KeychainKey {
@@ -293,6 +304,10 @@ mod imp {
 
     impl KeychainKey {
         pub fn into_rcgen_keypair(self) -> Result<rcgen::KeyPair> {
+            Err(unsupported())
+        }
+
+        pub fn sign_canary(&self) -> Result<()> {
             Err(unsupported())
         }
     }

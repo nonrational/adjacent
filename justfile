@@ -1,6 +1,9 @@
 daemon:
   cargo run -- daemon
 
+help:
+  cargo run -- --help
+
 build:
   cargo build
 

@@ -376,4 +376,26 @@ async fn install_port_forward_prints_pf_anchor_and_sudo_commands() {
         "stdout doesn't mention proxy port {}: {stdout}",
         sandbox.proxy_port
     );
+    // Output must be a valid shell script: outside heredocs, every line is a
+    // comment, blank, or an actual command — never a bare `rdr …` line that
+    // the shell would try to execute. The anchor body appears twice (once as
+    // docs, once inside a `<<EOF … EOF` heredoc); only the heredoc copy may be raw.
+    let mut in_heredoc = false;
+    for (i, line) in stdout.lines().enumerate() {
+        if line.contains("<<EOF") {
+            in_heredoc = true;
+            continue;
+        }
+        if in_heredoc {
+            if line.trim_start().starts_with("EOF") {
+                in_heredoc = false;
+            }
+            continue;
+        }
+        assert!(
+            !line.trim_start().starts_with("rdr "),
+            "line {} prints a bare `rdr` directive outside a heredoc — would error when output is piped to a script: {line:?}",
+            i + 1
+        );
+    }
 }

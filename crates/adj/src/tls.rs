@@ -17,6 +17,7 @@ use crate::paths;
 mod keychain;
 
 pub(crate) use keychain::delete as delete_keychain_ca;
+pub(crate) use keychain::load as load_keychain_ca;
 
 /// Tear down the local CA: remove the Keychain-resident key and any cached on-disk files.
 /// Idempotent — safe to call when no CA is present. Used by `install-ca --reset` and by

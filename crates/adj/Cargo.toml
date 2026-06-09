@@ -31,6 +31,9 @@ rcgen = { workspace = true }
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
+# Used by `adj doctor` to inspect the local CA's nameConstraints + expiry, and by the test
+# suite to assert the same properties when the CA is generated.
+x509-parser = "0.16"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
@@ -40,4 +43,3 @@ core-foundation-sys = "0.8"
 
 [dev-dependencies]
 tempfile = { workspace = true }
-x509-parser = "0.16"

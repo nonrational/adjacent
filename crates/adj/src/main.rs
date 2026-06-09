@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 mod agent_docs;
 mod client;
 mod daemon;
+mod doctor;
 mod env;
 mod installca;
 mod paths;
@@ -87,6 +88,10 @@ enum Cmd {
         #[arg(long)]
         reset: bool,
     },
+    /// Verify the local install end-to-end: pf port-forward rule, daemon reachability, and the
+    /// local CA (on-disk cert, keychain key, signing ACL, system trust). All checks are rootless.
+    /// Exit status is 0 when everything passes, 2 when any check fails.
+    Doctor,
 }
 
 #[tokio::main]
@@ -112,6 +117,7 @@ async fn main() -> ExitCode {
                 installca::install()
             }
         }
+        Cmd::Doctor => doctor::run(),
     };
 
     match result {

@@ -376,6 +376,78 @@ async fn https_listener_is_best_effort_when_ca_missing() {
     sandbox.stop_daemon().await;
 }
 
+/// Validate that `adj doctor` correctly classifies a sandboxed install with CA generated,
+/// HTTPS listener up, and `ADJACENT_DOCTOR_*_PORT` env vars pointed at the daemon's randomized
+/// high ports. The pf anchor check WILL fail (the test can't write to /etc/pf.anchors) and the
+/// system-trust check WILL fail (the CA isn't added to the dev's System keychain); the test
+/// asserts those failures live alongside the passing CA + marker probes, and that the binary
+/// exits with status 2 — the "doctor ran and found problems" sentinel.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn doctor_reports_pass_for_marker_and_ca_under_sandbox() {
+    let _guard = lock_login_keychain();
+    let mut sandbox = TlsSandbox::new().await;
+    sandbox.install_ca().await;
+    sandbox.start_daemon().await;
+
+    let http_port = sandbox.proxy_port;
+    let https_port = sandbox.https_port;
+    let out = sandbox
+        .cmd()
+        .env("ADJACENT_DOCTOR_HTTP_PORT", http_port.to_string())
+        .env("ADJACENT_DOCTOR_HTTPS_PORT", https_port.to_string())
+        .arg("doctor")
+        .output()
+        .await
+        .expect("doctor");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // 2 = "ran successfully, some checks failed" (pf anchor and system trust will fail in a
+    // sandboxed run). 0 would mean nothing surfaced as broken; 1 would mean the doctor itself
+    // errored out. Anything but 2 here is a behavior regression.
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "expected exit 2, got {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        out.status.code()
+    );
+
+    // Probes pointed at the daemon must pass.
+    assert!(
+        stdout.contains(&format!("*GOOD HTTP :{http_port} → daemon")),
+        "missing PF HTTP pass line:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("*GOOD HTTPS :{https_port} → daemon")),
+        "missing PF HTTPS pass line:\n{stdout}"
+    );
+    // CA inspection (cert file + keychain + sign canary) must pass after install_ca.
+    assert!(stdout.contains("*GOOD ca.crt"), "ca.crt check did not pass:\n{stdout}");
+    assert!(
+        stdout.contains("*GOOD login keychain entry"),
+        "keychain check did not pass:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("*GOOD keychain key signs"),
+        "sign canary did not pass:\n{stdout}"
+    );
+
+    // Anchor file check must fail with the install-port-forward hint — we can't write to /etc
+    // in a sandboxed test, so this is the expected sandbox state.
+    assert!(
+        stdout.contains("!FAIL pf anchor file"),
+        "anchor-file check should have failed in sandbox:\n{stdout}"
+    );
+    // System trust check fails too (no `security add-trusted-cert` in a sandboxed run).
+    assert!(
+        stdout.contains(&format!("!FAIL HTTPS :{https_port} validates under system trust")),
+        "system-trust check should have failed in sandbox:\n{stdout}"
+    );
+
+    sandbox.stop_daemon().await;
+}
+
 fn http_get(proxy_port: u16, host: &str) -> Result<(String, String), String> {
     let mut stream = TcpStream::connect(("127.0.0.1", proxy_port))
         .map_err(|e| format!("connect: {e}"))?;

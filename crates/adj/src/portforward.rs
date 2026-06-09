@@ -5,6 +5,19 @@ use crate::proxy::{https_port, proxy_port};
 /// Anchor name registered with pfctl. Lowercased + dotless for readability in `pfctl -s nat`.
 const ANCHOR_NAME: &str = "adjacent";
 
+/// Absolute path to the pf anchor file on disk. Exposed so `adj doctor` can verify the file
+/// exists with the expected rule set without shelling out to pfctl (which would require root).
+pub fn anchor_path() -> String {
+    format!("/etc/pf.anchors/{ANCHOR_NAME}")
+}
+
+/// Expected anchor body for a given pair of daemon ports. The doctor reads
+/// `/etc/pf.anchors/adjacent` and compares against this — if the daemon's ports were changed
+/// (via env vars) after the rule was installed, the file would be stale and the doctor flags it.
+pub fn expected_anchor_body(http_port: u16, https_port: u16) -> String {
+    anchor_rules(http_port, https_port)
+}
+
 /// Print the pf anchor content and the exact sudo invocation that installs it. The daemon never
 /// escalates: the user reviews and runs the printed commands themselves.
 pub fn install() -> Result<()> {
@@ -21,7 +34,12 @@ pub fn install() -> Result<()> {
     println!();
     println!("# 1. Anchor file ({anchor_path}):");
     println!("# ---8<--- begin anchor ---8<---");
-    print!("{anchor_body}");
+    // Comment-prefix the doc copy so the output stays a valid shell script when piped
+    // to a file and executed. The heredoc copy below (inside `sudo sh -c …`) is raw —
+    // heredoc treats it as data, not commands.
+    for line in anchor_body.lines() {
+        println!("# {line}");
+    }
     println!("# ---8<--- end anchor ---8<---");
     println!();
     println!("# 2. Write the anchor and load it (run as root):");
