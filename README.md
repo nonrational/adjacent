@@ -24,7 +24,48 @@ Homepage: [adj.ac/ent](https://adj.ac/ent)
 
 Coming soon. Work in progress: [github.com/nonrational/adjacent/issues](https://github.com/nonrational/adjacent/issues).
 
-## Build and run locally
+## Usage
+
+Run `adj <command> --help` for flags. Every read command supports `--json`.
+
+```zsh
+Usage: adj <COMMAND>
+
+Commands:
+  daemon                Run the Adjacent daemon in the foreground
+  add                   Register an app from a directory containing adjacent.toml
+  list                  List registered apps and their state
+  up                    Boot a registered app
+  down                  Stop a running app (SIGTERM, then SIGKILL after a grace period)
+  restart               Restart an app (down then up)
+  status                Report the current state of an app
+  logs                  Print the log file for an app
+  wait-ready            Block until an app reports ready (TCP-open or 2xx from health_check_url)
+  agent-instructions    Print a markdown steering doc telling AI coding agents how to interact with the Adjacent-supervised app in the target directory
+  install-port-forward  Print the pf anchor and the sudo command to redirect :80 to the proxy port
+  install-ca            Generate the local HTTPS CA (if missing) and print the sudo command to trust it
+  doctor                Verify the local install end-to-end: pf port-forward rule, daemon reachability, and the local CA (on-disk cert, keychain key, signing ACL, system trust). All checks are rootless. Exit status is 0 when everything passes, 2 when any check fails
+  help                  Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+```
+
+## Agent Integration
+
+When an agent runs in a directory with `adjacent.toml`, it should delegate server management to `adj`. `adj agent-instructions` prints a markdown steering doc. Redirect it to the agent's instructions file:
+
+```sh
+cd path/to/your/app
+adj agent-instructions >> CLAUDE.md   # or AGENTS.md
+```
+
+The doc names the app, names the dev command the agent should _not_ run, and lists the `adj` subcommands the agent should use to read state, restart, and verify changes.
+
+The landing page sources live in `ent/`; `just serve` runs `npx live-server` against it.
+
+## Local Development
 
 Toolchain pinned via `asdf` — see `.tool-versions` (rust 1.92.0, nodejs 26.2.0). Install the asdf plugins then run `asdf install` from the repo root.
 
@@ -56,16 +97,3 @@ idle_timeout = "30m"          # stop after no requests (default "15m", or "off")
 ```
 
 Then `curl -H 'Host: site.adj.ac' http://127.0.0.1:8080/` lazy-boots the app and proxies through. Full `--json` output schema in [`crates/adj/JSON.md`](crates/adj/JSON.md).
-
-## Telling agents about `adj`
-
-When a coding agent runs in a directory with `adjacent.toml`, it needs to know to use `adj` instead of starting the dev server itself. `adj agent-instructions` prints a markdown steering doc — pipe it into the agent's instructions file:
-
-```sh
-cd path/to/your/app
-adj agent-instructions >> CLAUDE.md   # or AGENTS.md
-```
-
-The doc names the app, names the dev command the agent should not run, and lists the `adj` subcommands the agent should use to read state, restart, and verify changes.
-
-The landing page sources live in `ent/`; `just serve` runs `npx live-server` against it.
