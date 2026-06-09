@@ -211,6 +211,48 @@ async fn proxy_lazy_boots_app_and_forwards_response() {
     sandbox.stop_daemon().await;
 }
 
+/// `adj doctor` probes the proxy by asking for Host `__adj_verify__.adj.ac`. The marker handler
+/// must short-circuit BEFORE the boot gate runs — otherwise a doctor probe on a fresh install
+/// (no apps registered) would surface as a 404 NotRegistered, and a doctor probe on an install
+/// where someone registered `__adj_verify__` would spawn that app. Neither is acceptable.
+#[tokio::test]
+async fn verify_marker_short_circuits_before_boot_gate() {
+    let mut sandbox = Sandbox::new().await;
+    sandbox.start_daemon().await;
+
+    let proxy_port = sandbox.proxy_port;
+    let (status_line, body) = tokio::task::spawn_blocking(move || {
+        http_get(proxy_port, "__adj_verify__.adj.ac", "/")
+    })
+    .await
+    .expect("join")
+    .expect("http_get");
+
+    assert!(
+        status_line.contains(" 200 "),
+        "expected 200 OK, got: {status_line}"
+    );
+    assert_eq!(
+        body, "adj-port-forward-ok\n",
+        "marker body must be the fixed `adj-port-forward-ok\\n` so the doctor can match by equality"
+    );
+
+    // No apps registered → registry is empty. If the marker had fallen through to the boot
+    // gate we'd see `[]` either way, but the 200/marker-body assertion above plus this
+    // sanity-check guard against a future "if name == reserved { ...load registry... }" rewrite.
+    let list = sandbox
+        .cmd()
+        .arg("list")
+        .arg("--json")
+        .output()
+        .await
+        .expect("list");
+    let stdout = String::from_utf8_lossy(&list.stdout);
+    assert_eq!(stdout.trim(), "[]", "no apps should have been registered");
+
+    sandbox.stop_daemon().await;
+}
+
 #[tokio::test]
 async fn proxy_single_flights_concurrent_first_requests() {
     let mut sandbox = Sandbox::new().await;

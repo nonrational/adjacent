@@ -257,7 +257,10 @@ async fn idle_scanner(supervisor: Arc<Supervisor>) {
 
 /// Names that point at daemon-served subdomains and cannot be claimed by a user app.
 /// Keep this list short — every entry takes a `<name>.adj.ac` namespace away from real apps.
-const RESERVED_NAMES: &[&str] = &["status"];
+/// `__adj_verify__` is the doctor probe target; reserving it stops a user app from shadowing
+/// the marker handler (the handler also wins at request time, but defense-in-depth keeps the
+/// error story coherent — registering it would never actually take effect).
+const RESERVED_NAMES: &[&str] = &["status", "__adj_verify__"];
 
 async fn add(path: String, registry_lock: Arc<Mutex<()>>) -> Result<Response> {
     // The client canonicalizes against the user's CWD before sending. We require absolute
@@ -274,8 +277,7 @@ async fn add(path: String, registry_lock: Arc<Mutex<()>>) -> Result<Response> {
     let cfg = registry::read_app_config(&canon)?;
     if RESERVED_NAMES.contains(&cfg.name.as_str()) {
         return Err(anyhow!(
-            "`{}` is reserved for the built-in dashboard at https://{}.adj.ac — rename the app in adjacent.toml",
-            cfg.name,
+            "`{}` is a reserved name (claimed by the daemon for built-in routes like the status dashboard and the doctor probe) — rename the app in adjacent.toml",
             cfg.name
         ));
     }

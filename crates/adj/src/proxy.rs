@@ -29,6 +29,12 @@ const HOST_SUFFIX: &str = ".adj.ac";
 pub const DEFAULT_BOOT_TIMEOUT_SECS: u64 = 60;
 pub const READY_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
+/// Reserved subdomain used by `adj doctor` to probe the proxy without booting an app. The body
+/// is fixed bytes so the doctor can match on equality, and the hostname is invalid for `adj add`
+/// (the reserved-names list in `daemon.rs` blocks claiming it) so no one can shadow it.
+pub const VERIFY_HOST: &str = "__adj_verify__.adj.ac";
+pub const VERIFY_BODY: &str = "adj-port-forward-ok\n";
+
 pub fn proxy_port() -> u16 {
     std::env::var(PROXY_PORT_ENV)
         .ok()
@@ -178,6 +184,20 @@ async fn handle(
     // registry or boot gate. Listed in `daemon::RESERVED_NAMES` so `adj add` refuses to claim it.
     if name == "status" {
         return status::handle(req, supervisor).await;
+    }
+
+    // Verify-marker: `adj doctor` hits this to confirm the port-forward rule routes a request
+    // to the daemon. Short-circuits before `ensure_running` so the probe doesn't accidentally
+    // spawn an app — important because the doctor can fire on a fresh install with no apps.
+    if host == VERIFY_HOST {
+        let body = Full::new(Bytes::from(VERIFY_BODY))
+            .map_err(|never: Infallible| match never {})
+            .boxed();
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+            .body(body)
+            .expect("verify response builds");
     }
 
     let upstream_port = match ensure_running(&name, supervisor.clone(), gate).await {
