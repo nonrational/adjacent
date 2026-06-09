@@ -19,6 +19,7 @@ use tokio::sync::Mutex;
 
 use crate::readiness::wait_ready;
 use crate::registry::{self, AppConfig, Registry};
+use crate::status;
 use crate::supervisor::Supervisor;
 use crate::tls;
 
@@ -172,6 +173,12 @@ async fn handle(
             )
         }
     };
+
+    // Reserved subdomain: the built-in dashboard. Handled in-process, never touches the
+    // registry or boot gate. Listed in `daemon::RESERVED_NAMES` so `adj add` refuses to claim it.
+    if name == "status" {
+        return status::handle(req, supervisor).await;
+    }
 
     let upstream_port = match ensure_running(&name, supervisor.clone(), gate).await {
         Ok(p) => p,

@@ -255,6 +255,10 @@ async fn idle_scanner(supervisor: Arc<Supervisor>) {
     }
 }
 
+/// Names that point at daemon-served subdomains and cannot be claimed by a user app.
+/// Keep this list short — every entry takes a `<name>.adj.ac` namespace away from real apps.
+const RESERVED_NAMES: &[&str] = &["status"];
+
 async fn add(path: String, registry_lock: Arc<Mutex<()>>) -> Result<Response> {
     // The client canonicalizes against the user's CWD before sending. We require absolute
     // paths here so we never silently resolve against the daemon's CWD.
@@ -268,6 +272,13 @@ async fn add(path: String, registry_lock: Arc<Mutex<()>>) -> Result<Response> {
     let canon = std::fs::canonicalize(&candidate)
         .with_context(|| format!("resolving path {}", path))?;
     let cfg = registry::read_app_config(&canon)?;
+    if RESERVED_NAMES.contains(&cfg.name.as_str()) {
+        return Err(anyhow!(
+            "`{}` is reserved for the built-in dashboard at https://{}.adj.ac — rename the app in adjacent.toml",
+            cfg.name,
+            cfg.name
+        ));
+    }
     // Serialize add operations so two concurrent calls can't both pass uniqueness and race on save.
     let _guard = registry_lock.lock().await;
     let mut reg = Registry::load()?;

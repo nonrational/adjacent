@@ -12,6 +12,7 @@ mod portforward;
 mod proxy;
 mod readiness;
 mod registry;
+mod status;
 mod supervisor;
 mod tls;
 

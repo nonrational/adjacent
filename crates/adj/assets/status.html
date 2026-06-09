@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Adjacent local status — registered apps and their state.">
+  <title>adj.ac/status</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --ink: #0a0a0a;
+      --paper: #ededea;
+      --dim: #6b6b66;
+      --rule: #1f1f1d;
+      --accent: #d4a574;
+      --accent-dim: #8a6a44;
+      --crashed: #c47a6a;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      background: var(--ink);
+      color: var(--paper);
+      font-family: 'JetBrains Mono', 'Berkeley Mono', 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-weight: 400;
+      font-size: 15px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+    body {
+      min-height: 100vh;
+      padding: 4rem 2rem;
+      background-image:
+        radial-gradient(circle at 20% 0%, rgba(212, 165, 116, 0.04), transparent 40%),
+        radial-gradient(circle at 80% 100%, rgba(212, 165, 116, 0.03), transparent 50%);
+    }
+    .frame { max-width: 720px; margin: 0 auto; animation: rise 0.6s ease-out both; }
+    @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+    .wordmark {
+      font-weight: 700;
+      font-size: clamp(2.4rem, 7vw, 4rem);
+      line-height: 1;
+      letter-spacing: -0.04em;
+      display: flex;
+      align-items: baseline;
+      flex-wrap: wrap;
+      gap: 0;
+      margin-bottom: 4rem;
+    }
+    .wordmark .a { color: var(--paper); }
+    .wordmark .b { color: var(--accent); }
+    .wordmark .slash { color: var(--rule); font-weight: 300; margin: 0 0.1em; }
+
+    .rule { height: 1px; background: var(--rule); margin: 0 0 1.5rem; }
+
+    #apps { display: flex; flex-direction: column; gap: 1.5rem; }
+
+    .app {
+      display: grid;
+      grid-template-columns: 1.5rem 1fr auto;
+      grid-template-rows: auto auto;
+      column-gap: 0.75rem;
+      row-gap: 0.1rem;
+      align-items: baseline;
+    }
+    .app .glyph {
+      grid-column: 1;
+      grid-row: 1;
+      font-size: 0.9rem;
+      line-height: 1;
+      color: var(--dim);
+      user-select: none;
+    }
+    .app.is-running .glyph { color: var(--accent); }
+    .app.is-crashed .glyph { color: var(--crashed); }
+    .app.is-missing .glyph { color: var(--accent-dim); }
+
+    .app .name {
+      grid-column: 2;
+      grid-row: 1;
+      font-weight: 500;
+      color: var(--paper);
+      text-decoration: none;
+      border-bottom: 1px dotted transparent;
+    }
+    .app .name:hover { border-bottom-color: var(--accent-dim); color: var(--accent); }
+    .app.is-missing .name {
+      text-decoration: line-through;
+      text-decoration-color: var(--accent-dim);
+      text-decoration-thickness: 1px;
+    }
+
+    .app .meta {
+      grid-column: 3;
+      grid-row: 1;
+      font-size: 13px;
+      color: var(--dim);
+      letter-spacing: 0.04em;
+      white-space: nowrap;
+    }
+    .app .meta .state { color: var(--paper); }
+    .app.is-running .meta .state { color: var(--accent); }
+    .app.is-crashed .meta .state { color: var(--crashed); }
+    .app.is-missing .meta .state { color: var(--accent-dim); }
+    .app .meta .port { color: var(--accent-dim); margin-left: 0.75rem; }
+    .app .meta .time { color: var(--dim); margin-left: 0.75rem; }
+
+    .app .path {
+      grid-column: 2 / 4;
+      grid-row: 2;
+      font-size: 13px;
+      color: var(--dim);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .empty {
+      color: var(--dim);
+      font-size: 14px;
+      padding: 2rem 0;
+    }
+    .empty code {
+      color: var(--accent);
+      background: rgba(212, 165, 116, 0.07);
+      padding: 0.15em 0.4em;
+      border-radius: 2px;
+    }
+
+    footer {
+      margin-top: 3rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--rule);
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      color: var(--dim);
+      letter-spacing: 0.05em;
+    }
+    footer a { color: var(--dim); text-decoration: none; border-bottom: 1px dotted var(--dim); }
+    footer a:hover { color: var(--accent); border-color: var(--accent); }
+
+    @media (max-width: 540px) {
+      body { padding: 2rem 1.25rem; }
+      .wordmark { margin-bottom: 2.5rem; }
+      .app { grid-template-columns: 1.25rem 1fr; }
+      .app .meta { grid-column: 1 / 3; grid-row: 2; margin-left: 1.75rem; }
+      .app .path { grid-column: 1 / 3; grid-row: 3; margin-left: 1.75rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <h1 class="wordmark"><span class="a">adj.ac</span><span class="slash">/</span><span class="b">status</span></h1>
+    <div class="rule"></div>
+    <div id="apps" aria-live="polite"></div>
+    <div id="empty" class="empty" hidden>No apps registered yet. Run <code>adj add &lt;path&gt;</code> in a directory with an <code>adjacent.toml</code>.</div>
+    <footer>
+      <span id="counter">&middot;</span>
+      <a href="https://github.com/nonrational/adjacent">source on github</a>
+    </footer>
+  </div>
+
+  <script>
+    // Poll the daemon for the latest snapshot. The HTML shell is rendered once; row
+    // contents are patched in place so layout doesn't jump on each tick.
+    const POLL_MS = 2000;
+    const $apps = document.getElementById('apps');
+    const $empty = document.getElementById('empty');
+    const $counter = document.getElementById('counter');
+    let lastFetchAt = null;
+    let footerTimer = null;
+
+    function relTime(iso) {
+      if (!iso) return '';
+      const then = Date.parse(iso);
+      if (!Number.isFinite(then)) return '';
+      let s = Math.max(0, Math.floor((Date.now() - then) / 1000));
+      if (s < 60) return `${s}s`;
+      const m = Math.floor(s / 60);
+      if (m < 60) return `${m}m`;
+      const h = Math.floor(m / 60), mm = m % 60;
+      if (h < 24) return mm ? `${h}h${mm}m` : `${h}h`;
+      const d = Math.floor(h / 24), hh = h % 24;
+      return hh ? `${d}d${hh}h` : `${d}d`;
+    }
+
+    function ago(iso) {
+      const t = relTime(iso);
+      return t ? `${t} ago` : '';
+    }
+
+    function rowFor(name) {
+      let row = $apps.querySelector(`.app[data-name="${CSS.escape(name)}"]`);
+      if (row) return row;
+      row = document.createElement('div');
+      row.className = 'app';
+      row.dataset.name = name;
+      row.innerHTML = `
+        <span class="glyph"></span>
+        <a class="name" target="_blank" rel="noopener"></a>
+        <span class="meta">
+          <span class="state"></span><span class="port"></span><span class="time"></span>
+        </span>
+        <span class="path"></span>`;
+      $apps.appendChild(row);
+      return row;
+    }
+
+    function glyphFor(state) {
+      if (state === 'running') return '●';   // ●
+      if (state === 'crashed') return '✗';   // ✗
+      if (state === 'missing') return '?';   // ? path no longer on disk
+      return '○';                            // ○ stopped
+    }
+
+    function setText(node, text) {
+      if (node.textContent !== text) node.textContent = text;
+    }
+
+    function setAttr(node, name, value) {
+      if (node.getAttribute(name) !== value) node.setAttribute(name, value);
+    }
+
+    function render(apps) {
+      const seen = new Set();
+      for (const app of apps) {
+        seen.add(app.name);
+        const row = rowFor(app.name);
+        row.classList.toggle('is-running', app.state === 'running');
+        row.classList.toggle('is-crashed', app.state === 'crashed');
+        row.classList.toggle('is-missing', app.state === 'missing');
+
+        setText(row.querySelector('.glyph'), glyphFor(app.state));
+
+        const nameLink = row.querySelector('.name');
+        setText(nameLink, app.name);
+        setAttr(nameLink, 'href', `//${app.name}.adj.ac/`);
+
+        setText(row.querySelector('.state'), app.state);
+        setText(row.querySelector('.port'), app.port != null ? `:${app.port}` : '');
+
+        let timeText = '';
+        if (app.state === 'running' && app.started_at) {
+          timeText = relTime(app.started_at);
+        } else if (app.state === 'crashed' && app.exit_code != null) {
+          timeText = `(exit ${app.exit_code})`;
+        }
+        setText(row.querySelector('.time'), timeText);
+
+        setText(row.querySelector('.path'), app.path || '');
+      }
+
+      // Drop rows for apps that disappeared from the registry.
+      for (const row of Array.from($apps.querySelectorAll('.app'))) {
+        if (!seen.has(row.dataset.name)) row.remove();
+      }
+
+      $empty.hidden = apps.length > 0;
+    }
+
+    function updateCounter() {
+      if (!lastFetchAt) {
+        $counter.textContent = 'connecting…';
+        return;
+      }
+      const s = Math.max(0, Math.floor((Date.now() - lastFetchAt) / 1000));
+      const count = $apps.querySelectorAll('.app').length;
+      const apps = count === 1 ? '1 app' : `${count} apps`;
+      $counter.textContent = `${apps} · refreshed ${s}s ago`;
+    }
+
+    async function tick() {
+      try {
+        const r = await fetch('/apps.json', { cache: 'no-store' });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const apps = await r.json();
+        render(Array.isArray(apps) ? apps : []);
+        lastFetchAt = Date.now();
+        updateCounter();
+      } catch (err) {
+        $counter.textContent = `offline · ${err.message}`;
+      }
+    }
+
+    let loopHandle = null;
+    function startLoop() {
+      if (loopHandle != null) return;
+      tick();
+      loopHandle = setInterval(tick, POLL_MS);
+      if (footerTimer == null) footerTimer = setInterval(updateCounter, 1000);
+    }
+    function stopLoop() {
+      if (loopHandle != null) { clearInterval(loopHandle); loopHandle = null; }
+      if (footerTimer != null) { clearInterval(footerTimer); footerTimer = null; }
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) stopLoop(); else startLoop();
+    });
+    startLoop();
+  </script>
+</body>
+</html>
