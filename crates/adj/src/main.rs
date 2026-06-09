@@ -79,7 +79,13 @@ enum Cmd {
     /// Print the pf anchor and the sudo command to redirect :80 to the proxy port.
     InstallPortForward,
     /// Generate the local HTTPS CA (if missing) and print the sudo command to trust it.
-    InstallCa,
+    InstallCa {
+        /// Wipe the Secure-Enclave-backed CA key and the on-disk cert. Use to start fresh, or as
+        /// test teardown. Prints the untrust command but does not run it — the trust anchor in
+        /// the system keychain is yours to remove.
+        #[arg(long)]
+        reset: bool,
+    },
 }
 
 #[tokio::main]
@@ -98,13 +104,22 @@ async fn main() -> ExitCode {
         Cmd::WaitReady { name, timeout } => client::wait_ready(name, timeout).await,
         Cmd::AgentInstructions { path } => agent_docs::emit(path),
         Cmd::InstallPortForward => portforward::install(),
-        Cmd::InstallCa => installca::install(),
+        Cmd::InstallCa { reset } => {
+            if reset {
+                installca::reset()
+            } else {
+                installca::install()
+            }
+        }
     };
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("adj: {err}");
+            // `{err:#}` uses anyhow's alternate format, which prints the full cause chain
+            // separated by ": ". Without `:#`, only the outermost `.context(...)` shows up and
+            // genuinely-helpful inner errors are lost.
+            eprintln!("adj: {err:#}");
             ExitCode::from(1)
         }
     }

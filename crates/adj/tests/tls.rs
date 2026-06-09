@@ -7,6 +7,21 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::process::{Child, Command};
 
+/// Tests that round-trip Adjacent's CA through the dev's real login.keychain serialize on this
+/// mutex. Cargo runs integration test fns in parallel by default, and two concurrent
+/// `install-ca` invocations race the macOS "do you allow access?" prompt + the first-time
+/// keychain unlock — observable as flake on a developer's machine. Each test still gets a unique
+/// `ADJACENT_HOME` → unique keychain label, so there's no data-race, just UI-race.
+#[cfg(target_os = "macos")]
+static LOGIN_KEYCHAIN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(target_os = "macos")]
+fn lock_login_keychain() -> std::sync::MutexGuard<'static, ()> {
+    LOGIN_KEYCHAIN_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 fn adj_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_adj"))
 }
@@ -67,7 +82,15 @@ impl TlsSandbox {
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(stdout.contains("security add-trusted-cert"), "banner missing security command: {stdout}");
         assert!(self.home_path.join("ca.crt").exists(), "ca.crt not created");
-        assert!(self.home_path.join("ca.key").exists(), "ca.key not created");
+        // The CA key now lives in the macOS login keychain, not on disk.
+        assert!(
+            !self.home_path.join("ca.key").exists(),
+            "ca.key should NOT exist — CA key lives in the login keychain"
+        );
+        assert!(
+            stdout.contains("login keychain"),
+            "banner should explain keychain storage: {stdout}"
+        );
     }
 
     async fn start_daemon(&mut self) {
@@ -146,6 +169,22 @@ impl TlsSandbox {
     }
 }
 
+impl Drop for TlsSandbox {
+    fn drop(&mut self) {
+        // Each test gets a unique `ADJACENT_HOME`, which the keychain backend uses to derive a
+        // unique SE label. Without this cleanup the dev's login keychain would accumulate one
+        // "Adjacent local CA (/var/folders/...)" entry per test run. Spawn the binary directly
+        // (sync, no tokio) — Drop can't be async and this runs even on panic.
+        let _ = std::process::Command::new(adj_bin())
+            .arg("install-ca")
+            .arg("--reset")
+            .env("ADJACENT_HOME", &self.home_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
 async fn write_app(dir: &Path, name: &str, cmd: &str) {
     let manifest = dir.join("adjacent.toml");
     let body = format!("name = \"{name}\"\ncmd = \"{cmd}\"\n");
@@ -174,8 +213,10 @@ ThreadingHTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
     format!("exec /usr/bin/python3 {}", script.display())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn install_ca_generates_files_and_prints_macos_command() {
+    let _guard = lock_login_keychain();
     let sandbox = TlsSandbox::new().await;
     sandbox.install_ca().await;
     // Second invocation must succeed without regenerating (idempotent UX) — but we don't assert
@@ -214,6 +255,7 @@ async fn install_port_forward_emits_both_http_and_https_rules() {
     );
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn https_proxy_forwards_request_through_tls_termination() {
     if !curl_available() {
@@ -221,6 +263,7 @@ async fn https_proxy_forwards_request_through_tls_termination() {
         return;
     }
 
+    let _guard = lock_login_keychain();
     let mut sandbox = TlsSandbox::new().await;
     sandbox.install_ca().await;
     sandbox.start_daemon().await;
