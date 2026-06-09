@@ -9,7 +9,7 @@ Adjacent is a local dev-server harness so a developer and a coding agent can sha
 Names are locked (see `~/.claude/projects/-Users-norton-src-adjacent/memory/project_naming.md`):
 - Brand: **Adjacent**, CLI: `adj`, domain: `*.adj.ac`, config file: `adjacent.toml`, home dir: `~/.adjacent/`.
 - Brand split in copy/visuals: `adj.ac` + `ent` (never `adj` + `ac.ent`). The `/` is the URL path boundary.
-- Public copy: no "tracer bullets", no "AI agents" (just "agents"), landing page is wordmark + tagline + status + footer — nothing else. Tagline: `Humans and agents live adjacently.`
+- Public copy: no "tracer bullets", no "AI agents" (just "agents"). Tagline: `Humans and agents live adjacently.` Landing page (revamped 2026-06-09) is a lean positioning page — wordmark + tagline, problem statement, commands, design principles, status, footer. Keep copy tight; the user cuts anything that bloats.
 
 Design contract: see `project_solocal_design.md`. Decisions to treat as load-bearing: lazy-boot + single-flight, PORT injection (override via `port_env`), JSONL logs at `~/.adjacent/logs/<name>.log`, idle shutdown default-on, **never runs as root** (privileged ops emit reviewable sudo commands).
 

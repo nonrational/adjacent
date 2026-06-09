@@ -3,8 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="A local dev-server harness for humans and agents to share.">
+  <meta name="description" content="A local dev-server harness so humans and agents can share one supervised server.">
   <title>adj.ac/ent</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
@@ -12,8 +13,10 @@
     :root {
       --ink: #0a0a0a;
       --paper: #ededea;
-      --dim: #6b6b66;
+      --soft: #b5b5af;
+      --dim: #7a7a74;
       --rule: #1f1f1d;
+      --panel: rgba(255, 255, 255, 0.015);
       --accent: #d4a574;
       --accent-dim: #8a6a44;
     }
@@ -30,65 +33,144 @@
     }
     body {
       min-height: 100vh;
-      padding: 4rem 2rem;
+      padding: 3rem clamp(2rem, 6vw, 5rem);
       background-image:
         radial-gradient(circle at 20% 0%, rgba(212, 165, 116, 0.04), transparent 40%),
         radial-gradient(circle at 80% 100%, rgba(212, 165, 116, 0.03), transparent 50%);
     }
-    .frame { max-width: 720px; margin: 0 auto; animation: rise 0.6s ease-out both; }
+    .frame { max-width: 1200px; margin: 0 auto; animation: rise 0.6s ease-out both; }
     @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
-    header { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; color: var(--dim); letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 6rem; }
+    header { display: flex; justify-content: flex-end; font-size: 12px; color: var(--dim); letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 6rem; }
     header a { color: var(--dim); text-decoration: none; border-bottom: 1px dotted var(--dim); }
     header a:hover { color: var(--accent); border-color: var(--accent); }
 
-    .wordmark { font-weight: 700; font-size: clamp(3rem, 9vw, 5.5rem); line-height: 1; letter-spacing: -0.04em; display: flex; align-items: baseline; flex-wrap: wrap; gap: 0; margin-bottom: 1.75rem; }
+    .wordmark { font-weight: 700; font-size: clamp(3rem, 8vw, 7rem); line-height: 1; letter-spacing: -0.04em; display: flex; align-items: baseline; flex-wrap: wrap; gap: 0; margin-bottom: 1.75rem; }
     .wordmark .a { color: var(--paper); }
     .wordmark .b { color: var(--accent); }
     .wordmark .slash { color: var(--rule); font-weight: 300; margin: 0 0.1em; }
-    .wordmark small { font-size: 0.22em; font-weight: 400; color: var(--dim); letter-spacing: 0.2em; text-transform: uppercase; align-self: center; margin-left: 1.5rem; padding-left: 1.5rem; border-left: 1px solid var(--rule); }
 
-    .pitch { font-size: clamp(1.15rem, 2vw, 1.4rem); font-weight: 300; color: var(--paper); max-width: 38ch; line-height: 1.45; margin-bottom: 5rem; }
+    .pitch { font-size: clamp(1.15rem, 2vw, 1.6rem); font-weight: 300; color: var(--paper); line-height: 1.45; margin-bottom: 1.25rem; }
     .pitch em { color: var(--accent); font-style: normal; }
+    .category { color: var(--soft); max-width: 52ch; margin-bottom: 7rem; }
+    .category code { color: var(--accent); font-size: 0.95em; }
 
-    section { margin-bottom: 4rem; }
-    .label { font-size: 11px; color: var(--dim); letter-spacing: 0.18em; text-transform: uppercase; margin-bottom: 1.25rem; display: flex; align-items: center; gap: 0.75rem; }
+    section { margin-bottom: 6rem; }
+    .label { font-size: 11px; color: var(--dim); letter-spacing: 0.18em; text-transform: uppercase; margin-bottom: 2rem; display: flex; align-items: center; gap: 0.75rem; }
     .label::after { content: ''; flex: 1; height: 1px; background: var(--rule); }
 
-    .framing p { margin-bottom: 1rem; max-width: 56ch; color: var(--paper); }
-    .framing p:last-child { color: var(--dim); }
-    .framing p:last-child strong { color: var(--paper); font-weight: 500; }
+    .cta { display: inline-block; color: var(--paper); text-decoration: none; border: 1px solid var(--accent-dim); padding: 0.65rem 1.4rem; font-size: 14px; letter-spacing: 0.02em; transition: border-color 0.15s, color 0.15s, background 0.15s; }
+    .cta:hover { color: var(--accent); border-color: var(--accent); background: rgba(212, 165, 116, 0.06); }
+    .cta .arrow { color: var(--accent); margin-left: 0.5rem; }
 
-    .diagram { font-size: 12px; line-height: 1.4; color: var(--dim); white-space: pre; overflow-x: auto; padding: 1.5rem 0; }
-    .diagram b { color: var(--accent); font-weight: 400; }
+    .statement { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 2rem 5rem; align-items: start; }
+    .statement h2 { font-size: clamp(1.6rem, 3.2vw, 2.6rem); font-weight: 700; letter-spacing: -0.02em; line-height: 1.2; }
+    .statement p { max-width: 58ch; color: var(--soft); margin-bottom: 1rem; }
+    .statement p strong { color: var(--paper); font-weight: 500; }
+    .statement .cta { margin-top: 0.75rem; }
 
-    .cmd { display: block; background: transparent; border-left: 2px solid var(--accent-dim); padding: 0.6rem 1rem; margin-bottom: 0.5rem; color: var(--paper); font-size: 14px; }
+    .cmds { max-width: 820px; counter-reset: step; }
+    .cmd { display: block; background: var(--panel); border: 1px solid var(--rule); border-left: 2px solid var(--accent-dim); padding: 0.85rem 1.25rem; margin-bottom: 0.75rem; color: var(--paper); font-size: 14px; counter-increment: step; position: relative; }
+    .cmd::after { content: '0' counter(step); position: absolute; top: 0.85rem; right: 1.25rem; font-size: 11px; color: var(--dim); letter-spacing: 0.15em; }
     .cmd .prompt { color: var(--accent); user-select: none; margin-right: 0.6rem; }
-    .cmd .note { color: var(--dim); font-size: 12px; margin-left: 0.6rem; }
+    .cmd .note { display: block; color: var(--soft); font-size: 12px; margin-top: 0.2rem; }
+
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2.5rem 4rem; }
+    .grid > div { border-top: 1px solid var(--rule); padding-top: 1.25rem; }
+    .grid h3 { font-size: 14px; font-weight: 700; color: var(--paper); margin-bottom: 0.5rem; }
+    .grid h3::before { content: '— '; color: var(--accent); font-weight: 400; }
+    .grid p { font-size: 13px; color: var(--soft); line-height: 1.6; }
+    .grid code { color: var(--accent); font-size: 0.95em; }
+
+    .closing { border-top: 1px solid var(--rule); padding-top: 3rem; }
+    .closing .status-line { font-size: clamp(1.15rem, 2vw, 1.5rem); font-weight: 300; color: var(--paper); margin-bottom: 1.75rem; }
+    .closing .facts { margin-top: 1.5rem; font-size: 12px; color: var(--dim); letter-spacing: 0.08em; text-transform: uppercase; }
 
     footer { margin-top: 6rem; padding-top: 2rem; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: 12px; color: var(--dim); letter-spacing: 0.05em; }
     footer a { color: var(--paper); text-decoration: none; border-bottom: 1px solid var(--accent-dim); padding-bottom: 1px; }
     footer a:hover { color: var(--accent); border-color: var(--accent); }
 
+    @media (max-width: 900px) {
+      .statement { grid-template-columns: 1fr; gap: 1.25rem; }
+      .statement h2 { max-width: 26ch; }
+      .grid { grid-template-columns: 1fr 1fr; gap: 2rem 2.75rem; }
+      header { margin-bottom: 4.5rem; }
+      .category { margin-bottom: 5rem; }
+      section { margin-bottom: 4.5rem; }
+    }
     @media (max-width: 540px) {
       body { padding: 2rem 1.25rem; }
-      header { margin-bottom: 3.5rem; }
-      .wordmark small { display: none; }
-      .pitch { margin-bottom: 3.5rem; }
+      header { margin-bottom: 3rem; }
+      .category { margin-bottom: 3.5rem; }
       section { margin-bottom: 3rem; }
+      .grid { grid-template-columns: 1fr; gap: 1.5rem; }
+      .cmd::after { display: none; }
     }
   </style>
 </head>
 <body>
   <div class="frame">
     <header>
+      <a href="https://github.com/nonrational/adjacent">github</a>
     </header>
 
     <h1 class="wordmark"><span class="a">adj.ac</span><span class="slash">/</span><span class="b">ent</span></h1>
     <p class="pitch"><em>Humans</em> and <em>agents</em> live adjacently.</p>
+    <p class="category">Adjacent is a local dev-server harness &mdash; one supervised dev server that you and your agent share, behind a real URL.</p>
+
+    <section class="statement">
+      <h2>Your dev server has two developers now.</h2>
+      <div>
+        <p>When you and your agent need the same local server, you evict each other. The agent takes the process &mdash; you lose the logs. You take it back &mdash; the agent can't verify its work.</p>
+        <p><strong>Adjacent supervises the server so neither of you has to own it.</strong> One daemon boots, routes and watches every app; both of you talk to it through the same CLI.</p>
+        <a class="cta" href="https://github.com/nonrational/adjacent">Read the source<span class="arrow">&rarr;</span></a>
+      </div>
+    </section>
 
     <section>
+      <div class="label">in practice</div>
+      <div class="cmds">
+        <code class="cmd"><span class="prompt">$</span>adj add .<span class="note"># register the app's adjacent.toml</span></code>
+        <code class="cmd"><span class="prompt">$</span>open https://site.adj.ac<span class="note"># first request boots the server</span></code>
+        <code class="cmd"><span class="prompt">$</span>adj logs site --tail<span class="note"># one log, both of you read it</span></code>
+        <code class="cmd"><span class="prompt">$</span>adj agent-instructions &gt;&gt; CLAUDE.md<span class="note"># teach your agent to share</span></code>
+      </div>
+    </section>
+
+    <section>
+      <div class="label">agentic by design</div>
+      <div class="grid">
+        <div>
+          <h3>One CLI for both of you</h3>
+          <p>The same commands for human and agent &mdash; every read takes <code>--json</code>. No separate agent mode, so the two sides can't drift.</p>
+        </div>
+        <div>
+          <h3>Lazy boot</h3>
+          <p>Nothing runs until a request hits <code>name.adj.ac</code>. Concurrent requests during boot wait on the same start.</p>
+        </div>
+        <div>
+          <h3>Ready means ready</h3>
+          <p>The proxy never forwards to a half-booted process. TCP-open by default, or poll a health check URL for a 2xx.</p>
+        </div>
+        <div>
+          <h3>Idle shutdown by default</h3>
+          <p>No traffic for 15 minutes and the app stops. Long agent sessions don't accumulate orphaned servers.</p>
+        </div>
+        <div>
+          <h3>TLS without a key on disk</h3>
+          <p>The local CA's private key lives in your keychain, never on disk &mdash; and the cert is name-constrained so it can never sign for another domain. <code>*.adj.ac</code> resolves from public DNS; no <code>/etc/hosts</code>.</p>
+        </div>
+        <div>
+          <h3>Never runs as root</h3>
+          <p>Privileged setup prints the command for you to review and sudo. The daemon itself never escalates.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="closing">
       <div class="label">status</div>
-      <p style="color: var(--dim); max-width: 56ch;">Coming soon to a terminal near you.</p>
+      <p class="status-line">Coming soon to a terminal near you.</p>
+      <a class="cta" href="https://github.com/nonrational/adjacent">Built in public &mdash; follow along on GitHub<span class="arrow">&rarr;</span></a>
+      <p class="facts">Rust &middot; macOS &middot; open source</p>
     </section>
 
     <footer>
