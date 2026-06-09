@@ -6,23 +6,31 @@ When both sides need the same local server running, they evict each other. The a
 
 Homepage: [adj.ac/ent](https://adj.ac/ent)
 
-## Shape (v1)
+## Agentic by Design
 
-- One CLI: `adj`. Same surface for human and agent — every read command supports `--json` ([schema](crates/adj/JSON.md)).
-- One entry per app. `adj add <path>` registers; per-app config lives in `adjacent.toml`.
-- Lazy-boot by default. Hit `foo.adj.ac`, the app starts, the request proxies through.
-- Readiness probing. Default is TCP-connect; set `health_check_url = "/healthz"` and the proxy waits for a 2xx before forwarding.
-- Idle shutdown. Apps stop after no proxied requests for `idle_timeout` (default `"15m"`, accepts `"30s"` / `"1h"` / `"off"`).
-- `adj wait-ready <name>` blocks until the app reports ready — handy in agent workflows after `adj restart`.
-- `$PORT` injected into the boot command. Apps bind to it. Quirky apps can opt into a different variable name via `port_env = "BIND_PORT"` in `adjacent.toml`.
-- Logs on disk at `~/.adjacent/logs/<name>.log`. `adj logs <name> --tail` works.
-- DNS via public wildcard `*.adj.ac → 127.0.0.1`. Offline-mode resolver hook is opt-in.
-- TLS via opt-in local CA. `adj install-ca` provisions a non-extractable ECDSA key in the macOS login keychain (no private key on disk), name-constrained to `*.adj.ac` so the CA cannot mint trusted certs for other domains.
-- **Never runs as root.** Privileged ops emit reviewable commands the user runs with sudo.
+- **One CLI for humans & agents.** One surface, `adj`, with `--json` on every read command ([schema](crates/adj/JSON.md)). No separate agent mode — parity keeps the contract simple and stops the two sides drifting apart.
+
+- **Config lives in code.** `adjacent.toml` sits in the app directory and registers via `adj add <path>`. The boot command and idle timeout are part of the repo, not buried in a global registry. Agents make config maintenance cheap.
+
+- **Lazy boot.** Apps don't run until a request hits `<name>.adj.ac`. Concurrent requests during boot wait on the same start.
+
+- **Readiness before forwarding.** Default is TCP-connect; opt into HTTP probing with `health_check_url = "/healthz"`. The proxy never forwards to a half-booted process. Agents can block on this explicitly with `adj wait-ready`.
+
+- **Idle shutdown by default.** Apps stop after `idle_timeout` (default `"15m"`, accepts `"30s"` / `"1h"` / `"off"`) with no proxied traffic. Long sessions don't accumulate orphaned servers.
+
+- **The daemon owns ports.** `$PORT` is injected into the boot command; the app binds where it's told. Apps that need a different variable name set `port_env = "BIND_PORT"`.
+
+- **Logs are JSONL on disk.** `~/.adjacent/logs/<name>.log` is the source of truth. `adj logs` projects them for humans; `adj logs --json` streams them as-is.
+
+- **DNS is real, not `/etc/hosts`.** `*.adj.ac` resolves to `127.0.0.1` via a public wildcard A record. No hosts editing, no local resolver, nothing to install for DNS to work.
+
+- **TLS without a private key on disk.** `adj install-ca` provisions an ECDSA key in the macOS login keychain marked non-extractable; the cert is name-constrained to `*.adj.ac` so the CA cannot mint trusted certs for other domains.
+
+- **Never runs as root.** Privileged ops — pf port-forward, CA trust — emit reviewable commands the user runs with `sudo`.
 
 ## Status
 
-Coming soon. Work in progress: [github.com/nonrational/adjacent/issues](https://github.com/nonrational/adjacent/issues).
+In development. See [github.com/nonrational/adjacent/issues](https://github.com/nonrational/adjacent/issues).
 
 ## Usage
 
