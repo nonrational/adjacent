@@ -11,7 +11,7 @@ test:
   cargo test
 
 serve:
-  npx live-server
+  npx live-server --port=8081
 
 # Rebuild + re-create the local CA so the macOS keychain ACL trusts the new binary.
 # A fresh `cargo build` changes the cdhash, which the CA key's ACL refuses (issue #44).
