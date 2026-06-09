@@ -87,6 +87,11 @@
       border-bottom: 1px dotted transparent;
     }
     .app .name:hover { border-bottom-color: var(--accent-dim); color: var(--accent); }
+    .app.is-missing .name {
+      text-decoration: line-through;
+      text-decoration-color: var(--accent-dim);
+      text-decoration-thickness: 1px;
+    }
 
     .app .meta {
       grid-column: 3;
@@ -111,10 +116,6 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-    }
-    .app.is-missing .path {
-      text-decoration: line-through;
-      text-decoration-color: var(--rule);
     }
 
     .empty {
