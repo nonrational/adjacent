@@ -116,7 +116,10 @@ async fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("adj: {err}");
+            // `{err:#}` uses anyhow's alternate format, which prints the full cause chain
+            // separated by ": ". Without `:#`, only the outermost `.context(...)` shows up and
+            // genuinely-helpful inner errors are lost.
+            eprintln!("adj: {err:#}");
             ExitCode::from(1)
         }
     }

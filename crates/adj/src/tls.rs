@@ -43,9 +43,9 @@ const APEX_HOST: &str = "adj.ac";
 const NAME_CONSTRAINT_DNS: &str = "adj.ac";
 
 pub const CA_CERT_FILENAME: &str = "ca.crt";
-/// Legacy on-disk private-key path. We no longer write to it (the CA key lives in the Secure
-/// Enclave), but `install-ca` looks for it to detect a pre-SE install and prompt the user to
-/// scrub the old material.
+/// Legacy on-disk private-key path. We no longer write to it (the CA key lives in the login
+/// keychain, marked non-extractable), but `install-ca` looks for it to detect a pre-keychain
+/// install and prompt the user to scrub the old material.
 pub const LEGACY_CA_KEY_FILENAME: &str = "ca.key";
 pub const LEAF_CERT_FILENAME: &str = "cert.crt";
 pub const LEAF_KEY_FILENAME: &str = "cert.key";
@@ -343,6 +343,38 @@ mod tests {
             let _cfg = server_config().expect("server_config");
             assert!(leaf_cert_path().unwrap().exists());
             assert!(leaf_key_path().unwrap().exists());
+        });
+    }
+
+    /// Regression guard for the `build_ca_params` timestamp + `from_ca_cert_pem` interaction.
+    /// `build_ca_params` embeds `now.as_secs()` in the OU, so calling it twice yields different
+    /// subjects. `issue_leaf` must re-parse the *on-disk* CA (not rebuild from scratch) so the
+    /// leaf's Issuer DN matches the trust-anchor's Subject DN — otherwise leaves wouldn't chain.
+    /// Without this test, a refactor that swaps `from_ca_cert_pem` for a `build_ca_params` call
+    /// would pass other tests and silently break HTTPS validation in browsers.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn leaf_issuer_matches_ca_subject_after_reissue() {
+        use std::time::Duration;
+        with_temp_home(|| {
+            generate_ca().expect("generate_ca");
+            // Force a measurable gap so any accidental rebuild path would land on a different
+            // `now.as_secs()` OU and the assertion would fail.
+            std::thread::sleep(Duration::from_millis(1100));
+            let _cfg = server_config().expect("server_config");
+            let ca_pem = std::fs::read_to_string(ca_cert_path().unwrap()).unwrap();
+            let leaf_pem = std::fs::read_to_string(leaf_cert_path().unwrap()).unwrap();
+            let (_, ca_block) =
+                x509_parser::pem::parse_x509_pem(ca_pem.as_bytes()).expect("ca pem");
+            let ca = ca_block.parse_x509().expect("ca x509");
+            let (_, leaf_block) =
+                x509_parser::pem::parse_x509_pem(leaf_pem.as_bytes()).expect("leaf pem");
+            let leaf = leaf_block.parse_x509().expect("leaf x509");
+            assert_eq!(
+                leaf.issuer().to_string(),
+                ca.subject().to_string(),
+                "leaf Issuer DN must equal CA Subject DN or chain validation fails"
+            );
         });
     }
 }

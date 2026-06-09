@@ -37,15 +37,21 @@ pub fn install() -> Result<()> {
     // Keychain to fix — print a removal script and bail before generating so the user
     // explicitly scrubs it.
     if legacy_key.exists() {
+        // Defensively drop any partial-state keychain entry from a previous interrupted run.
+        // The legacy-key path is the "something went wrong, let me clean up and retry" path,
+        // and a stale keychain entry under our label would otherwise survive the migration and
+        // become a permanent orphan in the user's login keychain. Errors are swallowed — if
+        // there's no entry to delete this is a no-op.
+        let _ = tls::delete_keychain_ca();
         println!("# Adjacent local CA — migration required");
         println!("#");
         println!("# A legacy on-disk private key is present at:");
         println!("#    {}", legacy_key.display());
         println!("#");
-        println!("# The CA now lives in your macOS login keychain (non-extractable: cannot be");
-        println!("# exported through Keychain Access) and the cert is name-constrained to");
-        println!("# `*.adj.ac`. To migrate, run the cleanup script below, then rerun");
-        println!("# `adj install-ca` to generate a fresh, Keychain-backed CA.");
+        println!("# The CA now lives in your macOS login keychain, marked non-extractable so");
+        println!("# `security export` and Keychain Access UI export both refuse it. The cert is");
+        println!("# also name-constrained to `*.adj.ac`. To migrate, run the cleanup script");
+        println!("# below, then rerun `adj install-ca` to generate a fresh, Keychain-backed CA.");
         println!();
         println!("# 1. Untrust the old root in the system keychain:");
         println!();
@@ -78,12 +84,13 @@ pub fn install() -> Result<()> {
     println!("# Adjacent local CA installer");
     println!("#");
     println!("# Adjacent serves HTTPS with a wildcard cert (`*.adj.ac`, `adj.ac`) signed by a");
-    println!("# local root CA. The CA private key lives in your macOS login keychain and is");
-    println!("# marked non-extractable — Keychain Access cannot export it, and `cat`/backup");
-    println!("# tools won't find it on disk. The cert carries a critical nameConstraints");
-    println!("# extension permitting only `adj.ac`, so even if the CA is misused it cannot");
-    println!("# mint trusted certs for other domains. Adjacent never escalates — review and");
-    println!("# run the command below.");
+    println!("# local root CA. The CA private key lives in your macOS login keychain, marked");
+    println!("# non-extractable: `security export`, Keychain Access UI export, and");
+    println!("# `SecItemCopyMatching` with `kSecReturnData` all refuse to hand the bytes back.");
+    println!("# No cleartext PEM on disk for `cat`/backup tools to scoop up. The cert carries a");
+    println!("# critical nameConstraints extension permitting only `adj.ac`, so even if the CA");
+    println!("# is misused it cannot mint trusted certs for other domains. Adjacent never");
+    println!("# escalates — review and run the command below.");
     println!();
     if just_generated {
         println!("# 1. CA generated:");
