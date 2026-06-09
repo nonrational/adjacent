@@ -1,24 +1,16 @@
-//! Adjacent's CA private key lives in the macOS login keychain, marked non-extractable.
-//!
-//! We tried Secure Enclave first (`Token::SecureEnclave`) but every persist attempt returned
-//! `errSecMissingEntitlement` — the SE path needs `keychain-access-groups` / application-id
-//! entitlements that an unsigned `cargo`-built binary cannot carry. Tried the
-//! `SecAccessControl` route too: setting `kSecAccessControlPrivateKeyUsage` triggers the same
-//! entitlement error, because that flag is SE-coupled. The shipping path is a hand-built
-//! `SecKeyCreateRandomKey` dictionary that drops `SecAccessControl` entirely and writes the raw
-//! `kSecAttrIsExtractable=false` attribute onto the private-key sub-dictionary — that attribute
-//! is independent of SE entitlements. Result: software ECDSA P-256 in the login keychain. The
-//! framework refuses to return the key bytes through ordinary tooling (`security export`,
-//! Keychain Access UI export, `SecItemCopyMatching(kSecReturnData=true)`). Signing routes
-//! through `SecKeyCreateSignature`, so rcgen's `RemoteKeyPair` integration is unchanged.
+//! Adjacent's CA private key lives in the macOS login keychain as a software ECDSA P-256 key,
+//! marked `kSecAttrIsExtractable=false`. Signing routes through `SecKeyCreateSignature` via
+//! rcgen's `RemoteKeyPair` trait, so the private key never enters process memory. The
+//! framework refuses to return the bytes through ordinary tooling (`security export`, Keychain
+//! Access UI export, `SecItemCopyMatching(kSecReturnData=true)`).
 //!
 //! *Not* a hardware boundary. `kSecAttrIsExtractable=false` is a software promise enforced by
 //! the Security framework — a determined attacker with the user's login password and
 //! framework-level access can probably still pull the bytes out via legacy `SecKeychain` APIs
-//! or platform quirks. Secure Enclave is the only thing that gives you the strong claim, and
-//! reaching SE requires a codesigned binary with `keychain-access-groups` entitlements. This
-//! change is a meaningful step up from "PEM file at mode 0600" — no more cleartext bytes on
-//! disk, no more accidental file copies, no Keychain-Access-UI export — but it's not absolute.
+//! or platform quirks. Secure Enclave is the only thing that gives the strong claim; moving
+//! the CA key into SE is tracked in #42. The current setup is a meaningful step up from
+//! "PEM file at mode 0600" — no cleartext bytes on disk, no accidental file copies, no
+//! Keychain Access UI export — but it is not absolute.
 //!
 //! The lookup key for the keychain entry is `kSecAttrLabel`. We derive a stable label per
 //! `ADJACENT_HOME` so a real install (`~/.adjacent`) and N test invocations (each with a unique
@@ -31,7 +23,7 @@ use anyhow::Result;
 use crate::paths;
 
 /// Stable per-install label used to find the CA key on second and subsequent runs. Derived from
-/// `home_dir()` (which honours `ADJACENT_HOME`), so the default install gets a recognisable
+/// `home_dir()` (which honors `ADJACENT_HOME`), so the default install gets a recognizable
 /// name in Keychain Access and tests get unique labels automatically.
 pub fn ca_label() -> Result<String> {
     let home = paths::home_dir()?;

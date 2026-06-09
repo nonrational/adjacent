@@ -11,8 +11,6 @@ permissions:
 jobs:
   test:
     strategy:
-      # Independent platform failures should both surface — one platform's red shouldn't cancel
-      # the other.
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-14]
