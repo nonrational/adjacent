@@ -87,14 +87,20 @@ async fn http_ready(port: u16, path: &str) -> bool {
     } else {
         format!("/{path}")
     };
+    // The spawned hyper connection task is parked on this slot so it can be aborted once the
+    // probe resolves. A timed-out probe drops `sender`, and hyper 1.x happens to propagate
+    // that by resolving the conn future — but that is drop-propagation behavior we don't
+    // control. The explicit abort guarantees the task (and its socket) never outlives the
+    // probe, regardless of hyper internals.
+    let mut conn_task: Option<tokio::task::JoinHandle<()>> = None;
     let attempt = async {
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let stream = TcpStream::connect(addr).await.ok()?;
         let io = TokioIo::new(stream);
         let (mut sender, conn) = client_http1::handshake::<_, Empty<Bytes>>(io).await.ok()?;
-        tokio::spawn(async move {
+        conn_task = Some(tokio::spawn(async move {
             let _ = conn.await;
-        });
+        }));
         let req = Request::builder()
             .uri(&path)
             .header(hyper::header::HOST, format!("127.0.0.1:{port}"))
@@ -107,9 +113,80 @@ async fn http_ready(port: u16, path: &str) -> bool {
         let _ = resp.into_body().collect().await;
         Some(status.is_success())
     };
-    tokio::time::timeout(Duration::from_millis(500), attempt)
+    let ready = tokio::time::timeout(Duration::from_millis(500), attempt)
         .await
         .ok()
         .flatten()
-        .unwrap_or(false)
+        .unwrap_or(false);
+    // Abort unconditionally: a no-op once the task has finished, a cancellation (dropping the
+    // socket) when the probe timed out or the probe completed while the connection lingered.
+    if let Some(task) = conn_task {
+        task.abort();
+    }
+    ready
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+
+    /// After N timed-out probes against a hung-but-listening server (accepts, holds the socket,
+    /// never responds), the runtime must carry no leftover connection tasks — only the server
+    /// task from this test survives. Each `#[tokio::test]` gets its own runtime, so the alive
+    /// count isn't polluted by unrelated tasks.
+    #[tokio::test]
+    async fn repeated_timed_out_probes_do_not_accumulate_tasks() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (sock, _) = listener.accept().await.unwrap();
+                held.push(sock);
+            }
+        });
+        let metrics = tokio::runtime::Handle::current().metrics();
+        let baseline = metrics.num_alive_tasks();
+        for _ in 0..10 {
+            assert!(!http_ready(port, "/healthz").await);
+        }
+        // Aborted tasks unwind asynchronously; poll briefly instead of asserting instantly.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while metrics.num_alive_tasks() > baseline {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "connection tasks leaked: {} alive vs baseline {}",
+                metrics.num_alive_tasks(),
+                baseline
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Regression test for the probe-task leak: a server that accepts but never responds makes
+    /// the probe time out, and the aborted connection task must drop the socket — observed by
+    /// the server reading EOF. Pre-fix, the orphaned task held the socket open indefinitely.
+    #[tokio::test]
+    async fn timed_out_probe_aborts_connection_task() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            loop {
+                match sock.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+
+        assert!(!http_ready(port, "/healthz").await);
+
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("upstream connection not closed after probe timeout")
+            .unwrap();
+    }
 }
