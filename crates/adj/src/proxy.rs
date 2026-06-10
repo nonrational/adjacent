@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -81,7 +81,7 @@ pub async fn run(supervisor: Arc<Supervisor>) -> Result<()> {
     let gate = Arc::new(BootGate::new());
 
     loop {
-        let (stream, _peer) = match listener.accept().await {
+        let (stream, peer) = match listener.accept().await {
             Ok(pair) => pair,
             Err(err) => {
                 tracing::warn!("proxy accept failed: {err}");
@@ -91,7 +91,7 @@ pub async fn run(supervisor: Arc<Supervisor>) -> Result<()> {
         let sup = supervisor.clone();
         let gate = gate.clone();
         tokio::spawn(async move {
-            serve_plain(stream, sup, gate).await;
+            serve_plain(stream, sup, gate, peer.ip(), "http").await;
         });
     }
 }
@@ -114,7 +114,7 @@ pub async fn run_https(supervisor: Arc<Supervisor>) -> Result<()> {
     let gate = Arc::new(BootGate::new());
 
     loop {
-        let (stream, _peer) = match listener.accept().await {
+        let (stream, peer) = match listener.accept().await {
             Ok(pair) => pair,
             Err(err) => {
                 tracing::warn!("https accept failed: {err}");
@@ -134,7 +134,7 @@ pub async fn run_https(supervisor: Arc<Supervisor>) -> Result<()> {
                     return;
                 }
             };
-            serve_plain(tls_stream, sup, gate).await;
+            serve_plain(tls_stream, sup, gate, peer.ip(), "https").await;
         });
     }
 }
@@ -142,15 +142,20 @@ pub async fn run_https(supervisor: Arc<Supervisor>) -> Result<()> {
 /// Run one HTTP/1.1 connection against the proxy's per-request handler. Parameterized over the
 /// underlying stream so the HTTP and HTTPS listeners share the same serve loop — the difference
 /// between them is purely accept-time framing.
-async fn serve_plain<S>(stream: S, sup: Arc<Supervisor>, gate: Arc<BootGate>)
-where
+async fn serve_plain<S>(
+    stream: S,
+    sup: Arc<Supervisor>,
+    gate: Arc<BootGate>,
+    client_ip: IpAddr,
+    proto: &'static str,
+) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let io = TokioIo::new(stream);
     let service = service_fn(move |req: Request<Incoming>| {
         let sup = sup.clone();
         let gate = gate.clone();
-        async move { Ok::<_, Infallible>(handle(req, sup, gate).await) }
+        async move { Ok::<_, Infallible>(handle(req, sup, gate, client_ip, proto).await) }
     });
     if let Err(err) = server_http1::Builder::new()
         .serve_connection(io, service)
@@ -165,6 +170,8 @@ async fn handle(
     req: Request<Incoming>,
     supervisor: Arc<Supervisor>,
     gate: Arc<BootGate>,
+    client_ip: IpAddr,
+    proto: &'static str,
 ) -> Response<BoxBody<Bytes, hyper::Error>> {
     let host = match host_from_request(&req) {
         Some(h) => h,
@@ -227,7 +234,7 @@ async fn handle(
     // for the duration of `idle_timeout` doesn't get spuriously stopped mid-stream.
     supervisor.touch_idle(&name).await;
 
-    match forward(req, upstream_port).await {
+    match forward(req, upstream_port, &host, client_ip, proto).await {
         Ok(resp) => resp,
         Err(err) => {
             tracing::warn!("proxy forward to `{name}:{upstream_port}` failed: {err}");
@@ -312,6 +319,9 @@ pub fn boot_timeout_for(cfg: &AppConfig) -> Duration {
 async fn forward(
     mut req: Request<Incoming>,
     upstream_port: u16,
+    original_host: &str,
+    client_ip: IpAddr,
+    proto: &'static str,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>> {
     let upstream_addr = SocketAddr::from(([127, 0, 0, 1], upstream_port));
     let stream = TcpStream::connect(upstream_addr)
@@ -327,6 +337,11 @@ async fn forward(
         }
     });
 
+    // Standard reverse-proxy forwarding headers, set BEFORE the Host rewrite below clobbers the
+    // only other record of the original hostname. Apps that generate absolute links or validate
+    // auth callbacks recover the request's true origin from these.
+    set_forwarded_headers(req.headers_mut(), original_host, client_ip, proto);
+
     // Rewrite the Host header to the upstream's loopback address so apps that key on Host (e.g.
     // dev servers with host-allowlist checks) accept the request.
     let upstream_host = format!("127.0.0.1:{upstream_port}");
@@ -341,6 +356,34 @@ async fn forward(
         .map_err(|e| anyhow!("sending upstream request: {e}"))?;
     let (parts, body) = resp.into_parts();
     Ok(Response::from_parts(parts, body.boxed()))
+}
+
+/// Set `X-Forwarded-Host` / `X-Forwarded-For` / `X-Forwarded-Proto` on the upstream request.
+/// `X-Forwarded-For` appends to any client-supplied value rather than overwriting — the
+/// rightmost entry is the one this proxy vouches for, per reverse-proxy convention.
+fn set_forwarded_headers(
+    headers: &mut hyper::HeaderMap,
+    original_host: &str,
+    client_ip: IpAddr,
+    proto: &'static str,
+) {
+    if let Ok(v) = hyper::header::HeaderValue::from_str(original_host) {
+        headers.insert("x-forwarded-host", v);
+    }
+    let xff = match headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(prior) => format!("{prior}, {client_ip}"),
+        None => client_ip.to_string(),
+    };
+    if let Ok(v) = hyper::header::HeaderValue::from_str(&xff) {
+        headers.insert("x-forwarded-for", v);
+    }
+    headers.insert(
+        "x-forwarded-proto",
+        hyper::header::HeaderValue::from_static(proto),
+    );
 }
 
 fn host_from_request<B>(req: &Request<B>) -> Option<String> {
@@ -396,6 +439,24 @@ mod tests {
         assert_eq!(strip_port("echo.adj.ac"), "echo.adj.ac");
         assert_eq!(strip_port("echo.adj.ac:8080"), "echo.adj.ac");
         assert_eq!(strip_port("echo.adj.ac:80"), "echo.adj.ac");
+    }
+
+    #[test]
+    fn forwarded_headers_set_on_clean_request() {
+        let mut headers = hyper::HeaderMap::new();
+        set_forwarded_headers(&mut headers, "echo.adj.ac", "127.0.0.1".parse().unwrap(), "http");
+        assert_eq!(headers["x-forwarded-host"], "echo.adj.ac");
+        assert_eq!(headers["x-forwarded-for"], "127.0.0.1");
+        assert_eq!(headers["x-forwarded-proto"], "http");
+    }
+
+    #[test]
+    fn forwarded_for_appends_to_existing_value() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert("x-forwarded-for", "10.0.0.1".parse().unwrap());
+        set_forwarded_headers(&mut headers, "echo.adj.ac", "127.0.0.1".parse().unwrap(), "https");
+        assert_eq!(headers["x-forwarded-for"], "10.0.0.1, 127.0.0.1");
+        assert_eq!(headers["x-forwarded-proto"], "https");
     }
 
     #[test]
