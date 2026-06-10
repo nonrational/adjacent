@@ -1,0 +1,5 @@
+name = "hello-docker"
+cmd = "docker run --rm --init --name adj-hello-docker -p 127.0.0.1:$PORT:80 traefik/whoami"
+health_check_url = "/"
+boot_timeout = 120
+idle_timeout = "5m"

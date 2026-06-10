@@ -73,6 +73,25 @@ The doc names the app, names the dev command the agent should _not_ run, and lis
 
 The landing page sources live in `ent/`; `just serve` runs `npx live-server` against it.
 
+## Containers
+
+`cmd` can be a `docker run` as easily as an `npm run dev`. The command runs through a shell, so `$PORT` expands — map it to the container's port:
+
+```toml
+name = "whoami"
+cmd = "docker run --rm --init --name adj-whoami -p 127.0.0.1:$PORT:80 traefik/whoami"
+health_check_url = "/"
+boot_timeout = 120            # first boot may need to pull the image
+```
+
+Three things make this the shape that works:
+
+- **Run attached.** No `-d`, no `compose up -d`. Adjacent supervises the process it spawned; a detached `docker run` exits immediately and reads as a crash. Attached, the docker client forwards SIGTERM to the container on `adj down` and idle shutdown.
+- **Set `health_check_url`.** Docker binds the host port before the app inside is listening, so the default TCP-open probe reports ready too early. An HTTP check polls through to the app itself.
+- **`--rm` and `--init`.** `--rm` keeps stopped containers from piling up. `--init` makes SIGTERM reach the app even when the image's entrypoint doesn't forward signals.
+
+One caveat: if a container ignores SIGTERM through the grace window, the follow-up SIGKILL kills the docker _client_ — the container keeps running under the Docker daemon. Naming it (`--name`) makes a leaked one easy to spot and `docker stop`.
+
 ## Local Development
 
 Toolchain pinned via `asdf` — see `.tool-versions` (rust 1.92.0, nodejs 26.2.0). Install the asdf plugins then run `asdf install` from the repo root.
