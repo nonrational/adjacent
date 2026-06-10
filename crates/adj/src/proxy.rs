@@ -313,6 +313,15 @@ async fn forward(
     mut req: Request<Incoming>,
     upstream_port: u16,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>> {
+    // Capture the downstream upgrade handle BEFORE the request is consumed by send_request.
+    // hyper stores it as a request extension; taking it here (rather than after the response)
+    // is the only window where the server half is still ours to claim. Vite/Webpack/Next HMR
+    // all ride on this — without it WebSocket requests die at the proxy boundary.
+    let downstream_upgrade = req
+        .headers()
+        .contains_key(hyper::header::UPGRADE)
+        .then(|| hyper::upgrade::on(&mut req));
+
     let upstream_addr = SocketAddr::from(([127, 0, 0, 1], upstream_port));
     let stream = TcpStream::connect(upstream_addr)
         .await
@@ -322,7 +331,10 @@ async fn forward(
         .await
         .map_err(|e| anyhow!("upstream handshake: {e}"))?;
     tokio::spawn(async move {
-        if let Err(err) = conn.await {
+        // with_upgrades keeps the client connection alive past a 101 so the upstream half of
+        // the upgrade can be claimed from the response; for plain requests it behaves like
+        // a normal drive-to-completion.
+        if let Err(err) = conn.with_upgrades().await {
             tracing::debug!("upstream connection ended: {err}");
         }
     });
@@ -335,10 +347,39 @@ async fn forward(
         upstream_host.parse().expect("loopback host header valid"),
     );
 
-    let resp = sender
+    let mut resp = sender
         .send_request(req)
         .await
         .map_err(|e| anyhow!("sending upstream request: {e}"))?;
+
+    // Upstream accepted the upgrade: pipe raw bytes both ways once hyper releases both halves.
+    // The 101 response returned below is what triggers hyper's server side to complete the
+    // downstream upgrade, so the join must happen in a detached task — awaiting it here would
+    // deadlock (downstream never upgrades until we return).
+    if resp.status() == StatusCode::SWITCHING_PROTOCOLS {
+        if let Some(downstream) = downstream_upgrade {
+            let upstream = hyper::upgrade::on(&mut resp);
+            tokio::spawn(async move {
+                let (down, up) = match tokio::join!(downstream, upstream) {
+                    (Ok(d), Ok(u)) => (d, u),
+                    (d, u) => {
+                        tracing::debug!(
+                            "upgrade completion failed (downstream: {:?}, upstream: {:?})",
+                            d.err(),
+                            u.err()
+                        );
+                        return;
+                    }
+                };
+                let mut down = TokioIo::new(down);
+                let mut up = TokioIo::new(up);
+                if let Err(err) = tokio::io::copy_bidirectional(&mut down, &mut up).await {
+                    tracing::debug!("upgraded tunnel closed: {err}");
+                }
+            });
+        }
+    }
+
     let (parts, body) = resp.into_parts();
     Ok(Response::from_parts(parts, body.boxed()))
 }
