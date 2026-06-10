@@ -141,7 +141,17 @@ pub fn parse_idle_timeout(raw: &str) -> Result<Option<Duration>> {
 pub fn idle_timeout_for(cfg: &AppConfig) -> Option<Duration> {
     match cfg.idle_timeout.as_deref() {
         None => Some(DEFAULT_IDLE_TIMEOUT),
-        Some(s) => parse_idle_timeout(s).unwrap_or(Some(DEFAULT_IDLE_TIMEOUT)),
+        // Unreachable when callers go through `read_app_config`, which validates eagerly.
+        // Warn loudly anyway so a future code path that skips validation can't turn a
+        // config typo into a silent default.
+        Some(s) => parse_idle_timeout(s).unwrap_or_else(|err| {
+            tracing::warn!(
+                idle_timeout = s,
+                error = %err,
+                "invalid idle_timeout; falling back to default"
+            );
+            Some(DEFAULT_IDLE_TIMEOUT)
+        }),
     }
 }
 
@@ -162,6 +172,37 @@ mod tests {
         assert_eq!(parse_idle_timeout("off").unwrap(), None);
         assert_eq!(parse_idle_timeout("OFF").unwrap(), None);
         assert_eq!(parse_idle_timeout("disabled").unwrap(), None);
+    }
+
+    fn cfg_with_idle_timeout(idle_timeout: Option<&str>) -> AppConfig {
+        AppConfig {
+            name: "test".into(),
+            cmd: "true".into(),
+            port_env: None,
+            env: None,
+            env_file: None,
+            boot_timeout: None,
+            health_check_url: None,
+            idle_timeout: idle_timeout.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn idle_timeout_for_resolves_unset_valid_and_off() {
+        assert_eq!(idle_timeout_for(&cfg_with_idle_timeout(None)), Some(DEFAULT_IDLE_TIMEOUT));
+        assert_eq!(
+            idle_timeout_for(&cfg_with_idle_timeout(Some("30s"))),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(idle_timeout_for(&cfg_with_idle_timeout(Some("off"))), None);
+    }
+
+    #[test]
+    fn idle_timeout_for_falls_back_to_default_on_parse_failure() {
+        assert_eq!(
+            idle_timeout_for(&cfg_with_idle_timeout(Some("10x"))),
+            Some(DEFAULT_IDLE_TIMEOUT)
+        );
     }
 
     #[test]
