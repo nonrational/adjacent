@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 mod agent_docs;
 mod client;
 mod daemon;
+mod dns;
 mod doctor;
 mod env;
 mod installca;
@@ -80,6 +81,11 @@ enum Cmd {
     },
     /// Print the pf anchor and the sudo command to redirect :80 to the proxy port.
     InstallPortForward,
+    /// Print the /etc/resolver/adj.ac hook and the sudo command to install it, so *.adj.ac
+    /// resolves via the daemon's local DNS server even offline.
+    InstallResolver,
+    /// Print the sudo command that removes the /etc/resolver/adj.ac hook.
+    UninstallResolver,
     /// Generate the local HTTPS CA (if missing) and print the sudo command to trust it.
     InstallCa {
         /// Wipe the Secure-Enclave-backed CA key and the on-disk cert. Use to start fresh, or as
@@ -110,6 +116,8 @@ async fn main() -> ExitCode {
         Cmd::WaitReady { name, timeout } => client::wait_ready(name, timeout).await,
         Cmd::AgentInstructions { path } => agent_docs::emit(path),
         Cmd::InstallPortForward => portforward::install(),
+        Cmd::InstallResolver => dns::install_resolver(),
+        Cmd::UninstallResolver => dns::uninstall_resolver(),
         Cmd::InstallCa { reset } => {
             if reset {
                 installca::reset()
