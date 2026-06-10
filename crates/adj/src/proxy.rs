@@ -52,9 +52,13 @@ pub fn https_port() -> u16 {
 /// Per-name boot lock map. Holding the inner `Mutex` while booting keeps the boot single-flight:
 /// concurrent waiters acquire the mutex one at a time, but the first one finishes the boot so
 /// every later acquirer sees the app already Running and returns immediately.
+///
+/// Entries are `Weak` so the map is bounded by in-flight boots rather than by every name ever
+/// requested — there is no app-removal RPC to hook cleanup onto, so a strong-reference map
+/// would keep entries for unregistered apps forever (issue #27).
 #[derive(Default)]
 pub struct BootGate {
-    locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    locks: Mutex<HashMap<String, std::sync::Weak<Mutex<()>>>>,
 }
 
 impl BootGate {
@@ -64,9 +68,13 @@ impl BootGate {
 
     async fn lock_for(&self, name: &str) -> Arc<Mutex<()>> {
         let mut map = self.locks.lock().await;
-        map.entry(name.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
+        map.retain(|_, weak| weak.strong_count() > 0);
+        if let Some(existing) = map.get(name).and_then(std::sync::Weak::upgrade) {
+            return existing;
+        }
+        let lock = Arc::new(Mutex::new(()));
+        map.insert(name.to_string(), Arc::downgrade(&lock));
+        lock
     }
 }
 
@@ -285,6 +293,11 @@ async fn ensure_running(
     let name_lock = gate.lock_for(name).await;
     let _guard = name_lock.lock().await;
 
+    // Capture the deadline before `up()` so a slow spawn counts against the boot budget —
+    // otherwise the total wait is up() time *plus* boot_timeout (issue #27).
+    let boot_timeout = boot_timeout_for(&cfg);
+    let deadline = tokio::time::Instant::now() + boot_timeout;
+
     if !matches!(supervisor.state(name).await, AppState::Running { .. }) {
         supervisor
             .up(entry.path.clone(), cfg.clone())
@@ -292,8 +305,6 @@ async fn ensure_running(
             .map_err(ProxyError::Other)?;
     }
 
-    let boot_timeout = boot_timeout_for(&cfg);
-    let deadline = tokio::time::Instant::now() + boot_timeout;
     match wait_ready(name, supervisor.as_ref(), &cfg, deadline).await {
         Ok(port) => Ok(port),
         Err(crate::readiness::ReadinessError::Timeout) => Err(ProxyError::BootTimeout),
@@ -396,6 +407,29 @@ mod tests {
         assert_eq!(strip_port("echo.adj.ac"), "echo.adj.ac");
         assert_eq!(strip_port("echo.adj.ac:8080"), "echo.adj.ac");
         assert_eq!(strip_port("echo.adj.ac:80"), "echo.adj.ac");
+    }
+
+    #[tokio::test]
+    async fn boot_gate_prunes_entries_once_unused() {
+        let gate = BootGate::new();
+        let lock_a = gate.lock_for("a").await;
+        assert_eq!(gate.locks.lock().await.len(), 1);
+
+        // While `a`'s lock is still held, asking for `b` must not prune it — and asking for
+        // `a` again must hand back the same Arc (single-flight depends on identity).
+        let lock_b = gate.lock_for("b").await;
+        let lock_a2 = gate.lock_for("a").await;
+        assert!(Arc::ptr_eq(&lock_a, &lock_a2));
+        assert_eq!(gate.locks.lock().await.len(), 2);
+
+        drop(lock_a);
+        drop(lock_a2);
+        drop(lock_b);
+        // All strong refs gone — the next lock_for sweeps the dead entries.
+        let _lock_c = gate.lock_for("c").await;
+        let map = gate.locks.lock().await;
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key("c"));
     }
 
     #[test]

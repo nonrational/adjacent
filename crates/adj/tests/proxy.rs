@@ -370,6 +370,11 @@ async fn install_port_forward_prints_pf_anchor_and_sudo_commands() {
     );
     // Sudo command shape.
     assert!(stdout.contains("sudo pfctl"), "missing sudo pfctl: {stdout}");
+    // The reload pipeline replaces the active NAT ruleset — output must warn about it.
+    assert!(
+        stdout.contains("replaces the active NAT ruleset"),
+        "missing NAT-replacement warning: {stdout}"
+    );
     // Target proxy port matches the sandbox override.
     assert!(
         stdout.contains(&format!("port {}", sandbox.proxy_port)),
