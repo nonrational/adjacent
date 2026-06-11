@@ -137,7 +137,8 @@ pub fn parse_idle_timeout(raw: &str) -> Result<Option<Duration>> {
 }
 
 /// Resolve `idle_timeout` to a Duration, applying the default when unset. Returns `None` when
-/// idle shutdown is disabled (`"off"`).
+/// idle shutdown is disabled (`"off"`). Invalid values warn and fall back to the default
+/// rather than erroring — see the comment on the parse arm below.
 pub fn idle_timeout_for(cfg: &AppConfig) -> Option<Duration> {
     match cfg.idle_timeout.as_deref() {
         None => Some(DEFAULT_IDLE_TIMEOUT),
@@ -198,10 +199,40 @@ mod tests {
     }
 
     #[test]
-    fn idle_timeout_for_falls_back_to_default_on_parse_failure() {
-        assert_eq!(
-            idle_timeout_for(&cfg_with_idle_timeout(Some("10x"))),
-            Some(DEFAULT_IDLE_TIMEOUT)
+    fn idle_timeout_for_warns_and_falls_back_to_default_on_parse_failure() {
+        // The old `unwrap_or` returned the same value on parse failure; the warn is the only
+        // observable difference, so capture the subscriber output and pin both.
+        #[derive(Clone, Default)]
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+            type Writer = Capture;
+            fn make_writer(&'a self) -> Capture {
+                self.clone()
+            }
+        }
+
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .finish();
+        let resolved = tracing::subscriber::with_default(subscriber, || {
+            idle_timeout_for(&cfg_with_idle_timeout(Some("10x")))
+        });
+
+        assert_eq!(resolved, Some(DEFAULT_IDLE_TIMEOUT));
+        let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            logs.contains("invalid idle_timeout") && logs.contains("10x"),
+            "expected a warn naming the bad value, got: {logs}"
         );
     }
 
