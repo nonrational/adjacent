@@ -30,6 +30,18 @@ pub fn registry_path() -> Result<PathBuf> {
     Ok(home_dir()?.join("registry.toml"))
 }
 
+/// Where the daemon records the proxy listener's actually-bound port. Only interesting when
+/// `ADJACENT_PROXY_PORT=0` hands port selection to the kernel — see `proxy::report_bound_port`.
+pub fn proxy_port_path() -> Result<PathBuf> {
+    Ok(home_dir()?.join("proxy.port"))
+}
+
+/// HTTPS counterpart of `proxy_port_path`. Absent when the HTTPS listener never bound
+/// (no CA installed, or the port was taken).
+pub fn https_port_path() -> Result<PathBuf> {
+    Ok(home_dir()?.join("https.port"))
+}
+
 pub fn log_path(name: &str) -> Result<PathBuf> {
     Ok(logs_dir()?.join(format!("{name}.log")))
 }

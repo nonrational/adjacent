@@ -26,9 +26,11 @@ fn adj_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_adj"))
 }
 
-fn pick_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind :0");
-    l.local_addr().expect("local_addr").port()
+/// Parse a `<port>\n` file the daemon writes after binding a listener. `None` until the file
+/// exists with a complete write.
+fn read_port_file(path: &Path) -> Option<u16> {
+    let s = std::fs::read_to_string(path).ok()?;
+    s.trim().parse().ok()
 }
 
 fn curl_available() -> bool {
@@ -54,8 +56,12 @@ impl TlsSandbox {
         Self {
             _home: home,
             home_path,
-            proxy_port: pick_port(),
-            https_port: pick_port(),
+            // 0 = the daemon binds kernel-assigned ports; start_daemon learns the real ports
+            // from the proxy.port / https.port files. Picking free ports here and re-binding
+            // them in the daemon raced concurrent test processes drawing from the same
+            // ephemeral range, which flaked as "connection reset by peer".
+            proxy_port: 0,
+            https_port: 0,
             daemon: None,
         }
     }
@@ -101,14 +107,14 @@ impl TlsSandbox {
         let child = c.spawn().expect("spawn daemon");
         self.daemon = Some(child);
 
-        // Wait for the control socket, the HTTP proxy port, AND the HTTPS port to bind.
+        // Wait for the control socket, the HTTP proxy port, AND the HTTPS port to bind. The
+        // daemon records each listener's kernel-assigned port after a successful bind, so a
+        // parsed port file means the listener is live and unambiguously ours.
         let deadline = Instant::now() + Duration::from_secs(5);
         let sock = self.home_path.join("sock");
-        let http_addr = format!("127.0.0.1:{}", self.proxy_port);
-        let https_addr = format!("127.0.0.1:{}", self.https_port);
+        let http_port_file = self.home_path.join("proxy.port");
+        let https_port_file = self.home_path.join("https.port");
         let mut sock_ready = false;
-        let mut http_ready = false;
-        let mut https_ready = false;
         while Instant::now() < deadline {
             if !sock_ready && sock.exists() {
                 let out = self
@@ -123,19 +129,24 @@ impl TlsSandbox {
                     sock_ready = true;
                 }
             }
-            if !http_ready && TcpStream::connect(&http_addr).is_ok() {
-                http_ready = true;
+            if self.proxy_port == 0 {
+                if let Some(p) = read_port_file(&http_port_file) {
+                    self.proxy_port = p;
+                }
             }
-            if !https_ready && TcpStream::connect(&https_addr).is_ok() {
-                https_ready = true;
+            if self.https_port == 0 {
+                if let Some(p) = read_port_file(&https_port_file) {
+                    self.https_port = p;
+                }
             }
-            if sock_ready && http_ready && https_ready {
+            if sock_ready && self.proxy_port != 0 && self.https_port != 0 {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         panic!(
-            "daemon did not come up within 5s (sock={sock_ready}, http={http_ready}, https={https_ready})"
+            "daemon did not come up within 5s (sock={sock_ready}, http_port={}, https_port={})",
+            self.proxy_port, self.https_port
         );
     }
 
@@ -149,11 +160,14 @@ impl TlsSandbox {
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let sock = self.home_path.join("sock");
-        let http_addr = format!("127.0.0.1:{}", self.proxy_port);
+        let http_port_file = self.home_path.join("proxy.port");
         while Instant::now() < deadline {
-            let sock_ready = sock.exists();
-            let http_ready = TcpStream::connect(&http_addr).is_ok();
-            if sock_ready && http_ready {
+            if self.proxy_port == 0 {
+                if let Some(p) = read_port_file(&http_port_file) {
+                    self.proxy_port = p;
+                }
+            }
+            if sock.exists() && self.proxy_port != 0 {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -234,7 +248,12 @@ async fn install_ca_generates_files_and_prints_macos_command() {
 
 #[tokio::test]
 async fn install_port_forward_emits_both_http_and_https_rules() {
-    let sandbox = TlsSandbox::new().await;
+    let mut sandbox = TlsSandbox::new().await;
+    // No daemon runs here — install-port-forward only renders text from the env vars, so
+    // fixed values keep the assertions meaningful (the sandbox default of 0 would have the
+    // rules — and the assertions — say "port 0").
+    sandbox.proxy_port = 18080;
+    sandbox.https_port = 18443;
     let out = sandbox
         .cmd()
         .arg("install-port-forward")
@@ -362,14 +381,13 @@ async fn https_listener_is_best_effort_when_ca_missing() {
     assert!(status_line.contains(" 200 "), "status: {status_line}");
     assert!(body.contains("http-still-works"), "body: {body}");
 
-    // HTTPS port should NOT be bound — the listener task exited at startup because the CA is
-    // missing. Give it a beat to actually exit and then probe.
+    // HTTPS should NOT have bound — the listener task exited at startup because the CA is
+    // missing. It records its port in https.port only after a successful bind, so the file
+    // staying absent is the signal. Give the task a beat to run first.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let https_addr = format!("127.0.0.1:{}", sandbox.https_port);
     assert!(
-        TcpStream::connect_timeout(&https_addr.parse().unwrap(), Duration::from_millis(200))
-            .is_err(),
-        "https port should not be bound when CA is missing"
+        !sandbox.home_path.join("https.port").exists(),
+        "https.port should not exist when the CA is missing"
     );
 
     let _ = sandbox.cmd().arg("down").arg("echo").output().await;
