@@ -120,7 +120,7 @@ In `read_app_config`, after the empty-name check (`registry.rs:91-93`), add:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo test -p adj --lib registry`
+Run: `cargo test -p adj --bin adj registry`
 Expected: all registry unit tests PASS, including the three new ones.
 
 - [ ] **Step 5: Run the full suite to catch regressions**
@@ -172,7 +172,7 @@ Replace the `extracts_name_from_adj_ac_host` test in `crates/adj/src/proxy.rs` w
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p adj --lib extracts_name_from_adj_ac_host`
+Run: `cargo test -p adj --bin adj extracts_name_from_adj_ac_host`
 Expected: FAIL — `feature-x.site.adj.ac` currently returns `None` (the `prefix.contains('.')` guard).
 
 - [ ] **Step 3: Implement**
@@ -197,7 +197,7 @@ fn name_from_host(host: &str) -> Option<String> {
 
 - [ ] **Step 4: Run tests**
 
-Run: `cargo test -p adj --lib extracts_name_from_adj_ac_host && cargo test --test proxy`
+Run: `cargo test -p adj --bin adj extracts_name_from_adj_ac_host && cargo test --test proxy`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -578,7 +578,22 @@ fn validate_label(label: &str) -> Result<()> {
 
 - [ ] **Step 5: Fix the base-name checks so instances can boot**
 
-In `crates/adj/src/daemon.rs` `up()` (currently `if cfg.name != name` around line 324), replace the check with:
+**Re-key the supervisor by the registry key.** `Supervisor::up` currently derives its map key from `cfg.name` (`crates/adj/src/supervisor.rs:69-70`: `let name = cfg.name.clone();`). For an instance, the registry key is `demo.site` but `cfg.name` is `site` — so the boot would register under `site`, `wait_ready("demo.site", …)` would poll a key that never leaves `Stopped` (guaranteed 504), two instances of one base would collide on the supervisor key, and both would interleave into `site.log`. The key can't be derived from `cfg`, so pass it explicitly.
+
+In `crates/adj/src/supervisor.rs`, change the signature and drop the derivation:
+
+```rust
+    pub async fn up(&self, name: &str, app_dir: PathBuf, cfg: AppConfig) -> Result<u32> {
+        let name = name.to_string();
+```
+
+Update all three call sites to pass the registry key:
+
+- `crates/adj/src/daemon.rs` `up()` (~line 332): `supervisor.up(&name, entry.path, cfg).await?;`
+- `crates/adj/src/daemon.rs` `restart()` (~line 352): `supervisor.up(&name, entry.path, cfg).await?;`
+- `crates/adj/src/proxy.rs` `ensure_running()` (~line 290): `.up(name, entry.path.clone(), cfg.clone())`
+
+**Then fix the base-name checks.** In `crates/adj/src/daemon.rs` `up()` (currently `if cfg.name != name` around line 324), replace the check with:
 
 ```rust
     // An instance key is `<label>.<cfg.name>`; only the base must match the manifest. A full
@@ -713,7 +728,7 @@ mod worktree;
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p adj --lib sanitizes_branch_names`
+Run: `cargo test -p adj --bin adj sanitizes_branch_names`
 Expected: compile error — `sanitize_label` doesn't exist.
 
 - [ ] **Step 3: Implement detection + sanitization**
@@ -795,7 +810,7 @@ In `add`, after the `canonicalize` line and before building the request:
 
 - [ ] **Step 4: Run unit tests**
 
-Run: `cargo test -p adj --lib sanitizes_branch_names`
+Run: `cargo test -p adj --bin adj sanitizes_branch_names`
 Expected: PASS.
 
 - [ ] **Step 5: Add the integration tests (failing only if implementation is wrong)**
@@ -1348,7 +1363,7 @@ Add to `mod tests` in `crates/adj/src/tls.rs` (note: `registry_sans_adds_wildcar
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p adj --lib registry_sans_adds && cargo test -p adj --lib leaf_reissues`
+Run: `cargo test -p adj --bin adj registry_sans_adds && cargo test -p adj --bin adj leaf_reissues`
 Expected: compile error — `registry_sans`, `leaf_covers` don't exist and `ensure_leaf` takes no arguments.
 
 - [ ] **Step 3: Implement SAN computation and conditional re-issue**
@@ -1457,7 +1472,7 @@ fn issue_leaf(sans: &[String]) -> Result<(String, String)> {
 
 - [ ] **Step 4: Run the unit tests**
 
-Run: `cargo test -p adj --lib registry_sans_adds && cargo test -p adj --lib leaf_reissues`
+Run: `cargo test -p adj --bin adj registry_sans_adds && cargo test -p adj --bin adj leaf_reissues`
 Expected: PASS. (The crate won't fully compile yet if `server_config()` callers are broken — fix in the next step before running if so; `ensure_leaf()` call inside `server_config` needs updating: pass `&registry_sans(&Registry::load()?)` temporarily or proceed straight to Step 5.)
 
 - [ ] **Step 5: Add the resolver and rebuild `server_config` around it**
