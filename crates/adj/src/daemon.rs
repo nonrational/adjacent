@@ -450,6 +450,16 @@ async fn remove(
     ) {
         supervisor.down(&name).await?;
     }
+    // Clear the supervisor's AppRuntime so a subsequent `adj add` + boot sees a clean Stopped
+    // slate rather than the last run's state (e.g. Crashed from a previous life of the app).
+    //
+    // Known race: the proxy's `ensure_running` reads the registry *without* the registry lock,
+    // so a request racing `remove` can lazy-boot the app back between our `down` and the
+    // `reg.save()` below. `forget` refuses to drop a Running entry for exactly this reason —
+    // the resurrected process stays in the supervisor map where the idle scanner can reap it,
+    // and `adj down <name>` still works because `down` operates on supervisor state, not the
+    // registry. Accepted for a local dev tool over giving the proxy a registry-lock dependency.
+    supervisor.forget(&name).await;
     reg.remove(&name);
     reg.save()?;
     Ok(Response::Removed { name })
@@ -475,6 +485,10 @@ async fn prune(supervisor: Arc<Supervisor>, registry_lock: Arc<Mutex<()>>) -> Re
                 tracing::warn!("stopping stale `{name}` during prune failed: {err}");
             }
         }
+        // Same ghost-state cleanup as remove: drop the AppRuntime so re-adding the same path
+        // later doesn't inherit the old run's state. The same resurrection race documented on
+        // `remove` applies here; the idle scanner is the backstop.
+        supervisor.forget(name).await;
         reg.remove(name);
     }
     if !stale.is_empty() {

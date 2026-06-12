@@ -149,7 +149,11 @@ ThreadingHTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
 }
 
 async fn write_app(dir: &Path, name: &str) {
-    let body = format!("name = \"{name}\"\ncmd = \"exec /usr/bin/python3 server.py\"\n");
+    write_app_with_cmd(dir, name, "exec /usr/bin/python3 server.py").await;
+}
+
+async fn write_app_with_cmd(dir: &Path, name: &str, cmd: &str) {
+    let body = format!("name = \"{name}\"\ncmd = \"{cmd}\"\n");
     tokio::fs::write(dir.join("adjacent.toml"), body)
         .await
         .expect("write toml");
@@ -439,6 +443,70 @@ async fn remove_stops_and_deregisters_one_app() {
     // Removing an unknown name is an error.
     let rm2 = sandbox.cmd().arg("remove").arg("gone").output().await.expect("remove2");
     assert!(!rm2.status.success(), "second remove must fail");
+
+    sandbox.stop_daemon().await;
+}
+
+#[tokio::test]
+async fn removed_app_reregisters_with_clean_state() {
+    let mut sandbox = Sandbox::new().await;
+    sandbox.start_daemon().await;
+
+    // Register a crash-on-start app so the supervisor records a Crashed entry, giving us a
+    // non-trivial pre-remove state to assert against after re-registration.
+    let crash_dir = TempDir::new().expect("crash dir");
+    write_app_with_cmd(crash_dir.path(), "phoenix", "exit 7").await;
+
+    let add = sandbox.cmd().arg("add").arg(crash_dir.path()).output().await.expect("add");
+    assert!(add.status.success(), "add: {add:?}");
+
+    // Explicitly boot it so the supervisor has a Running → Crashed transition to record.
+    let _ = sandbox.cmd().arg("up").arg("phoenix").output().await.expect("up");
+
+    // Poll until the supervisor records the crash (the wait task is async; give it 5s).
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let list = sandbox.cmd().args(["list", "--json"]).output().await.expect("list");
+        let entries: serde_json::Value = serde_json::from_slice(&list.stdout).expect("parse");
+        let state = entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "phoenix")
+            .and_then(|e| e["state"].as_str())
+            .unwrap_or("")
+            .to_string();
+        if state == "crashed" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "phoenix did not crash within 5s, state={state}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Remove and immediately re-add the same directory.
+    let rm = sandbox.cmd().arg("remove").arg("phoenix").output().await.expect("remove");
+    assert!(rm.status.success(), "remove: {rm:?}");
+
+    let add2 = sandbox.cmd().arg("add").arg(crash_dir.path()).output().await.expect("re-add");
+    assert!(add2.status.success(), "re-add: {add2:?}");
+
+    // The re-added app must start from a clean Stopped slate — not the pre-remove Crashed state.
+    // Without supervisor::forget() the old AppRuntime lingers and list reports "crashed".
+    let list = sandbox.cmd().args(["list", "--json"]).output().await.expect("list2");
+    let entries: serde_json::Value = serde_json::from_slice(&list.stdout).expect("parse2");
+    let entry = entries
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "phoenix")
+        .expect("phoenix entry");
+    assert_eq!(
+        entry["state"], "stopped",
+        "re-added app must start from a clean slate: {entries}"
+    );
 
     sandbox.stop_daemon().await;
 }

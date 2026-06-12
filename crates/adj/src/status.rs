@@ -1,5 +1,4 @@
 use std::convert::Infallible;
-use std::path::Path;
 use std::sync::Arc;
 
 use adj_protocol::{AppState, AppSummary};
@@ -84,12 +83,12 @@ struct DashboardEntry<'a> {
 }
 
 fn dashboard_entry(e: &AppSummary) -> DashboardEntry<'_> {
-    // `path.exists()` is a metadata stat under the hood — if the registry has drifted away from
-    // disk (the user moved or deleted the app directory) the row should make that obvious rather
-    // than silently reporting `stopped`. Override the displayed state to `"missing"` regardless
-    // of the supervisor's view: even a Running app whose path has vanished can't be restarted,
-    // and surfacing the inconsistency is more useful than hiding it behind the live state.
-    if !Path::new(e.path.as_str()).exists() {
+    // `snapshot()` already stats each path and records the result in `e.stale`; reuse that bit
+    // rather than issuing a second syscall here for every dashboard refresh.
+    // Override the displayed state to `"missing"` regardless of the supervisor's view: even a
+    // Running app whose path has vanished can't be restarted, and surfacing the inconsistency
+    // is more useful than hiding it behind the live state.
+    if e.stale {
         return DashboardEntry {
             name: &e.name,
             path: &e.path,
