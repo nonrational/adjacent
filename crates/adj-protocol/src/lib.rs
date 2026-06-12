@@ -3,7 +3,13 @@ use serde::{Deserialize, Serialize, Serializer};
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Request {
-    Add { path: String },
+    Add {
+        path: String,
+        /// Register as a named instance `<label>.<name>` (routes at `<label>.<name>.adj.ac`).
+        /// `None` registers under the bare app name as before.
+        #[serde(default)]
+        label: Option<String>,
+    },
     List,
     Up { name: String },
     Down { name: String },

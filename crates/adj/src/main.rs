@@ -33,7 +33,13 @@ enum Cmd {
     /// Run the Adjacent daemon in the foreground.
     Daemon,
     /// Register an app from a directory containing adjacent.toml.
-    Add { path: String },
+    Add {
+        path: String,
+        /// Register as a named instance: `<label>.<name>.adj.ac`. Defaults to the sanitized
+        /// git branch name when the directory is a linked git worktree.
+        #[arg(long)]
+        label: Option<String>,
+    },
     /// List registered apps and their state.
     List {
         /// Emit a JSON array of `{name, path, state, port?}` instead of the human view.
@@ -100,7 +106,7 @@ async fn main() -> ExitCode {
 
     let result = match cli.cmd {
         Cmd::Daemon => daemon::run().await,
-        Cmd::Add { path } => client::add(path).await,
+        Cmd::Add { path, label } => client::add(path, label).await,
         Cmd::List { json } => client::list(json).await,
         Cmd::Up { name } => client::up(name).await,
         Cmd::Down { name } => client::down(name).await,

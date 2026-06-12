@@ -1,0 +1,244 @@
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::{Duration, Instant};
+
+use tempfile::TempDir;
+use tokio::process::{Child, Command};
+
+fn adj_bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_adj"))
+}
+
+/// Bind :0, read the assigned port, close. The kernel may reissue this number to anyone before
+/// the daemon claims it, but for a localhost test that's rare enough to accept.
+fn pick_port() -> u16 {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind :0");
+    l.local_addr().expect("local_addr").port()
+}
+
+struct Sandbox {
+    _home: TempDir,
+    home_path: PathBuf,
+    proxy_port: u16,
+    daemon: Option<Child>,
+}
+
+impl Sandbox {
+    async fn new() -> Self {
+        let home = TempDir::new().expect("tempdir");
+        let home_path = home.path().to_path_buf();
+        Self {
+            _home: home,
+            home_path,
+            proxy_port: pick_port(),
+            daemon: None,
+        }
+    }
+
+    fn cmd(&self) -> Command {
+        let mut c = Command::new(adj_bin());
+        c.env("ADJACENT_HOME", &self.home_path);
+        c.env("ADJACENT_PROXY_PORT", self.proxy_port.to_string());
+        c.env("RUST_LOG", "warn");
+        c.env_remove("PORT");
+        c.env_remove("BIND_PORT");
+        c
+    }
+
+    async fn start_daemon(&mut self) {
+        let mut c = self.cmd();
+        c.arg("daemon");
+        c.stdout(Stdio::null());
+        c.stderr(Stdio::null());
+        let child = c.spawn().expect("spawn daemon");
+        self.daemon = Some(child);
+
+        // Wait for both the control socket and the proxy port to be live.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let sock = self.home_path.join("sock");
+        let proxy_addr = format!("127.0.0.1:{}", self.proxy_port);
+        let mut sock_ready = false;
+        let mut proxy_ready = false;
+        while Instant::now() < deadline {
+            if !sock_ready && sock.exists() {
+                let out = self
+                    .cmd()
+                    .arg("status")
+                    .arg("__probe__")
+                    .output()
+                    .await
+                    .expect("probe");
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if !stderr.contains("daemon not reachable") {
+                    sock_ready = true;
+                }
+            }
+            if !proxy_ready && TcpStream::connect(&proxy_addr).is_ok() {
+                proxy_ready = true;
+            }
+            if sock_ready && proxy_ready {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("daemon did not come up within 5s (sock={sock_ready}, proxy={proxy_ready})");
+    }
+
+    async fn stop_daemon(&mut self) {
+        if let Some(mut child) = self.daemon.take() {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
+    }
+}
+
+/// Run git in `dir` with a hermetic identity so the test doesn't depend on (or trip over)
+/// the developer's global config — including gpg signing.
+// Task 4's tests consume this helper; allowed unused in Task 3.
+#[allow(dead_code)]
+async fn git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=adj-test",
+            "-c",
+            "user.email=adj-test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .args(args)
+        .output()
+        .await
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Echo server that responds with the contents of `marker.txt` from its working directory.
+/// The supervisor runs `cmd` with the app dir as cwd, so each registered directory (main
+/// checkout vs worktree) serves its own marker — that's how the tests tell instances apart.
+async fn write_echo_server(dir: &Path) {
+    let py = r#"import os
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = open("marker.txt", "rb").read()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a, **kw):
+        pass
+ThreadingHTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
+"#;
+    tokio::fs::write(dir.join("server.py"), py)
+        .await
+        .expect("write server.py");
+}
+
+async fn write_app(dir: &Path, name: &str) {
+    let body = format!("name = \"{name}\"\ncmd = \"exec /usr/bin/python3 server.py\"\n");
+    tokio::fs::write(dir.join("adjacent.toml"), body)
+        .await
+        .expect("write toml");
+}
+
+async fn write_marker(dir: &Path, marker: &str) {
+    tokio::fs::write(dir.join("marker.txt"), marker)
+        .await
+        .expect("write marker");
+}
+
+/// Send an HTTP GET to the proxy with the given Host header, return (status_line, body).
+fn http_get(proxy_port: u16, host: &str, path: &str) -> Result<(String, String), String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", proxy_port))
+        .map_err(|e| format!("connect: {e}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(70)))
+        .map_err(|e| format!("set_read_timeout: {e}"))?;
+    let req = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| format!("write: {e}"))?;
+    let mut buf = Vec::new();
+    stream
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("read: {e}"))?;
+    let text = String::from_utf8_lossy(&buf).to_string();
+    let mut parts = text.splitn(2, "\r\n");
+    let status_line = parts.next().unwrap_or("").to_string();
+    let rest = parts.next().unwrap_or("");
+    let body = if let Some(idx) = rest.find("\r\n\r\n") {
+        rest[idx + 4..].to_string()
+    } else {
+        String::new()
+    };
+    Ok((status_line, body))
+}
+
+async fn http_get_async(proxy_port: u16, host: &str, path: &str) -> (String, String) {
+    let host = host.to_string();
+    let path = path.to_string();
+    tokio::task::spawn_blocking(move || http_get(proxy_port, &host, &path))
+        .await
+        .expect("join")
+        .expect("http_get")
+}
+
+#[tokio::test]
+async fn label_flag_registers_routable_instance() {
+    let mut sandbox = Sandbox::new().await;
+    sandbox.start_daemon().await;
+
+    let app_dir = TempDir::new().expect("app dir");
+    write_echo_server(app_dir.path()).await;
+    write_marker(app_dir.path(), "hello-from-instance").await;
+    write_app(app_dir.path(), "site").await;
+
+    let add = sandbox
+        .cmd()
+        .arg("add")
+        .arg("--label")
+        .arg("demo")
+        .arg(app_dir.path())
+        .output()
+        .await
+        .expect("add");
+    assert!(add.status.success(), "add: {add:?}");
+    let stdout = String::from_utf8_lossy(&add.stdout);
+    assert!(stdout.contains("demo.site"), "stdout: {stdout}");
+
+    let (status_line, body) =
+        http_get_async(sandbox.proxy_port, "demo.site.adj.ac", "/").await;
+    assert!(status_line.contains(" 200 "), "status: {status_line}");
+    assert!(body.contains("hello-from-instance"), "body: {body}");
+
+    // Only the instance was registered — the bare name must not resolve.
+    let (nf_status, _) = http_get_async(sandbox.proxy_port, "site.adj.ac", "/").await;
+    assert!(nf_status.contains(" 404 "), "expected 404 for bare name: {nf_status}");
+
+    // Invalid labels are rejected daemon-side.
+    let bad = sandbox
+        .cmd()
+        .arg("add")
+        .arg("--label")
+        .arg("Bad_Label")
+        .arg(app_dir.path())
+        .output()
+        .await
+        .expect("add bad label");
+    assert!(!bad.status.success(), "uppercase/underscore label must be rejected");
+
+    let _ = sandbox.cmd().arg("down").arg("demo.site").output().await;
+    sandbox.stop_daemon().await;
+}

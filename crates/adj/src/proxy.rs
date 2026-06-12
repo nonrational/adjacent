@@ -265,9 +265,9 @@ async fn ensure_running(
         None => return Err(ProxyError::NotRegistered),
     };
     let cfg = registry::read_app_config(&entry.path).map_err(ProxyError::Other)?;
-    if cfg.name != name {
+    if registry::base_name(name) != cfg.name {
         return Err(ProxyError::Other(anyhow!(
-            "adjacent.toml at {} declares name `{}`, not `{}`",
+            "adjacent.toml at {} declares name `{}`, which does not match `{}`",
             entry.path.display(),
             cfg.name,
             name
@@ -287,7 +287,7 @@ async fn ensure_running(
 
     if !matches!(supervisor.state(name).await, AppState::Running { .. }) {
         supervisor
-            .up(entry.path.clone(), cfg.clone())
+            .up(name, entry.path.clone(), cfg.clone())
             .await
             .map_err(ProxyError::Other)?;
     }

@@ -66,8 +66,8 @@ impl Supervisor {
             .unwrap_or(AppState::Stopped)
     }
 
-    pub async fn up(&self, app_dir: PathBuf, cfg: AppConfig) -> Result<u32> {
-        let name = cfg.name.clone();
+    pub async fn up(&self, name: &str, app_dir: PathBuf, cfg: AppConfig) -> Result<u32> {
+        let name = name.to_string();
         let mut inner = self.inner.lock().await;
         if let Some(rt) = inner.apps.get(&name) {
             if matches!(rt.state, AppState::Running { .. }) {

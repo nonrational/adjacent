@@ -169,7 +169,7 @@ async fn dispatch(
 ) -> Result<Response> {
     match req {
         Request::Ping => Ok(Response::Ok),
-        Request::Add { path } => add(path, registry_lock).await,
+        Request::Add { path, label } => add(path, label, registry_lock).await,
         Request::List => list(supervisor).await,
         Request::Up { name } => up(name, supervisor).await,
         Request::Down { name } => down(name, supervisor).await,
@@ -262,7 +262,11 @@ async fn idle_scanner(supervisor: Arc<Supervisor>) {
 /// error story coherent — registering it would never actually take effect).
 const RESERVED_NAMES: &[&str] = &["status", "__adj_verify__"];
 
-async fn add(path: String, registry_lock: Arc<Mutex<()>>) -> Result<Response> {
+async fn add(
+    path: String,
+    label: Option<String>,
+    registry_lock: Arc<Mutex<()>>,
+) -> Result<Response> {
     // The client canonicalizes against the user's CWD before sending. We require absolute
     // paths here so we never silently resolve against the daemon's CWD.
     let candidate = PathBuf::from(&path);
@@ -281,23 +285,51 @@ async fn add(path: String, registry_lock: Arc<Mutex<()>>) -> Result<Response> {
             cfg.name
         ));
     }
+    // The client derives labels (from `--label` or the git branch), but the daemon owns
+    // validation: the label becomes a DNS label in `<label>.<name>.adj.ac` and a path
+    // component of the log file, so the charset is restricted at the trust boundary.
+    let key = match &label {
+        Some(label) => {
+            validate_label(label)?;
+            if RESERVED_NAMES.contains(&label.as_str()) {
+                return Err(anyhow!("`{label}` is a reserved name — pick another label"));
+            }
+            format!("{label}.{}", cfg.name)
+        }
+        None => cfg.name.clone(),
+    };
     // Serialize add operations so two concurrent calls can't both pass uniqueness and race on save.
     let _guard = registry_lock.lock().await;
     let mut reg = Registry::load()?;
-    if reg.get(&cfg.name).is_some() {
-        return Err(anyhow!("an app named `{}` is already registered", cfg.name));
+    if reg.get(&key).is_some() {
+        return Err(anyhow!(
+            "an app named `{key}` is already registered (use `--label` to register another instance)"
+        ));
     }
     reg.insert(
-        cfg.name.clone(),
+        key.clone(),
         registry::AppEntry {
             path: canon.clone(),
         },
     );
     reg.save()?;
     Ok(Response::Added {
-        name: cfg.name,
+        name: key,
         path: canon.display().to_string(),
     })
+}
+
+fn validate_label(label: &str) -> Result<()> {
+    let valid = !label.is_empty()
+        && label
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !valid {
+        return Err(anyhow!(
+            "label `{label}` must be a DNS label: lowercase letters, digits, and `-` only"
+        ));
+    }
+    Ok(())
 }
 
 async fn list(supervisor: Arc<Supervisor>) -> Result<Response> {
@@ -321,15 +353,17 @@ async fn up(name: String, supervisor: Arc<Supervisor>) -> Result<Response> {
         .ok_or_else(|| anyhow!("no app named `{}`", name))?
         .clone();
     let cfg = registry::read_app_config(&entry.path)?;
-    if cfg.name != name {
+    // An instance key is `<label>.<cfg.name>`; only the base must match the manifest. A full
+    // equality check here would refuse to boot every registered worktree instance.
+    if registry::base_name(&name) != cfg.name {
         return Err(anyhow!(
-            "adjacent.toml at {} declares name `{}`, not `{}`",
+            "adjacent.toml at {} declares name `{}`, which does not match `{}`",
             entry.path.display(),
             cfg.name,
             name
         ));
     }
-    supervisor.up(entry.path, cfg).await?;
+    supervisor.up(&name, entry.path, cfg).await?;
     Ok(Response::Ok)
 }
 
@@ -349,7 +383,7 @@ async fn restart(name: String, supervisor: Arc<Supervisor>) -> Result<Response> 
         .ok_or_else(|| anyhow!("no app named `{}`", name))?
         .clone();
     let cfg = registry::read_app_config(&entry.path)?;
-    supervisor.up(entry.path, cfg).await?;
+    supervisor.up(&name, entry.path, cfg).await?;
     Ok(Response::Ok)
 }
 
