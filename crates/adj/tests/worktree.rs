@@ -111,6 +111,10 @@ async fn git(dir: &Path, args: &[&str]) {
             "init.defaultBranch=main",
         ])
         .args(args)
+        // Prevent the developer's global init.templateDir and core.hooksPath from leaking
+        // into test repos — either can inject hooks that break the hermetic git setup.
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .await
         .expect("run git");
