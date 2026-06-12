@@ -77,6 +77,26 @@ impl Registry {
     pub fn insert(&mut self, name: String, entry: AppEntry) {
         self.apps.insert(name, entry);
     }
+
+    pub fn remove(&mut self, name: &str) -> Option<AppEntry> {
+        self.apps.remove(name)
+    }
+}
+
+/// Split a registry key into `(label, base)`. Keys are either a bare app name (`site`) or a
+/// worktree-instance key (`feature-x.site`). `add` enforces at most one dot, so `split_once`
+/// is total here.
+pub fn split_key(key: &str) -> (Option<&str>, &str) {
+    match key.split_once('.') {
+        Some((label, base)) => (Some(label), base),
+        None => (None, key),
+    }
+}
+
+/// The app name a registry key resolves config against: the part after the instance label,
+/// or the whole key when there is no label.
+pub fn base_name(key: &str) -> &str {
+    split_key(key).1
 }
 
 pub fn read_app_config(dir: &Path) -> Result<AppConfig> {
@@ -90,6 +110,14 @@ pub fn read_app_config(dir: &Path) -> Result<AppConfig> {
         toml::from_str(&raw).with_context(|| format!("parsing {}", manifest.display()))?;
     if cfg.name.trim().is_empty() {
         return Err(anyhow!("adjacent.toml is missing a non-empty `name`"));
+    }
+    // Dots are structural in registry keys (`<label>.<name>` is a worktree instance), so a
+    // dotted app name would make `feature-x.site` ambiguous. Reject at the source.
+    if cfg.name.contains('.') {
+        return Err(anyhow!(
+            "app name `{}` contains `.` — dots are reserved for worktree instances (`<label>.<name>`)",
+            cfg.name
+        ));
     }
     if cfg.cmd.trim().is_empty() {
         return Err(anyhow!("adjacent.toml is missing a non-empty `cmd`"));
@@ -171,5 +199,34 @@ mod tests {
         assert!(parse_idle_timeout("10").is_err());
         assert!(parse_idle_timeout("10x").is_err());
         assert!(parse_idle_timeout("abc").is_err());
+    }
+
+    #[test]
+    fn split_key_handles_bare_and_instance_keys() {
+        assert_eq!(split_key("site"), (None, "site"));
+        assert_eq!(split_key("feature-x.site"), (Some("feature-x"), "site"));
+        assert_eq!(base_name("site"), "site");
+        assert_eq!(base_name("feature-x.site"), "site");
+    }
+
+    #[test]
+    fn read_app_config_rejects_dotted_names() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("adjacent.toml"),
+            "name = \"a.b\"\ncmd = \"true\"\n",
+        )
+        .expect("write toml");
+        let err = read_app_config(tmp.path()).unwrap_err();
+        assert!(format!("{err:#}").contains('.'), "error should mention the dot: {err:#}");
+    }
+
+    #[test]
+    fn registry_remove_deletes_entry() {
+        let mut reg = Registry::default();
+        reg.insert("site".into(), AppEntry { path: "/tmp/site".into() });
+        assert!(reg.remove("site").is_some());
+        assert!(reg.get("site").is_none());
+        assert!(reg.remove("site").is_none());
     }
 }
