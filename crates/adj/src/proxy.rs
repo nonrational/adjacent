@@ -364,7 +364,12 @@ fn strip_port(host: &str) -> String {
 fn name_from_host(host: &str) -> Option<String> {
     let lower = host.to_ascii_lowercase();
     let prefix = lower.strip_suffix(HOST_SUFFIX)?;
-    if prefix.is_empty() || prefix.contains('.') {
+    // Accept `<name>` or `<label>.<name>` — at most one dot, no empty label on either side.
+    // Anything deeper has no registrable key, so reject rather than guess.
+    if prefix.is_empty() || prefix.matches('.').count() > 1 {
+        return None;
+    }
+    if prefix.split('.').any(|part| part.is_empty()) {
         return None;
     }
     Some(prefix.to_string())
@@ -402,8 +407,13 @@ mod tests {
     fn extracts_name_from_adj_ac_host() {
         assert_eq!(name_from_host("echo.adj.ac"), Some("echo".into()));
         assert_eq!(name_from_host("ECHO.adj.ac"), Some("echo".into()));
-        // Multi-label subdomains aren't supported by registration (one name = one DNS label).
-        assert_eq!(name_from_host("a.b.adj.ac"), None);
+        // Worktree instances are `<label>.<name>` — exactly one dot in the prefix.
+        assert_eq!(name_from_host("feature-x.site.adj.ac"), Some("feature-x.site".into()));
+        // Deeper nesting is not a registrable key.
+        assert_eq!(name_from_host("a.b.c.adj.ac"), None);
+        // Empty labels on either side of the dot are invalid.
+        assert_eq!(name_from_host(".site.adj.ac"), None);
+        assert_eq!(name_from_host("x..adj.ac"), None);
         assert_eq!(name_from_host("example.com"), None);
         assert_eq!(name_from_host(".adj.ac"), None);
     }
