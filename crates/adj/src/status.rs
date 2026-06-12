@@ -146,6 +146,7 @@ async fn snapshot(supervisor: Arc<Supervisor>) -> anyhow::Result<Vec<AppSummary>
             name: name.clone(),
             path: entry.path.display().to_string(),
             state,
+            stale: !entry.path.exists(),
         });
     }
     Ok(entries)

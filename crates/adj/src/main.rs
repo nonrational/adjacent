@@ -53,6 +53,10 @@ enum Cmd {
     Down { name: String },
     /// Restart an app (down then up).
     Restart { name: String },
+    /// Remove an app from the registry (stopping it first if running).
+    Remove { name: String },
+    /// Remove every registry entry whose directory no longer exists on disk.
+    Prune,
     /// Report the current state of an app.
     Status {
         name: String,
@@ -112,6 +116,8 @@ async fn main() -> ExitCode {
         Cmd::Up { name } => client::up(name).await,
         Cmd::Down { name } => client::down(name).await,
         Cmd::Restart { name } => client::restart(name).await,
+        Cmd::Remove { name } => client::remove(name).await,
+        Cmd::Prune => client::prune().await,
         Cmd::Status { name, json } => client::status(name, json).await,
         Cmd::Logs { name, tail, json } => client::logs(name, tail, json).await,
         Cmd::WaitReady { name, timeout } => client::wait_ready(name, timeout).await,

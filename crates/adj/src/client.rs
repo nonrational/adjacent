@@ -80,6 +80,7 @@ pub async fn list(json: bool) -> Result<()> {
                     name: &e.name,
                     path: &e.path,
                     state: &e.state,
+                    stale: e.stale,
                 })
                 .collect();
             let out = serde_json::to_string(&dtos)?;
@@ -90,8 +91,37 @@ pub async fn list(json: bool) -> Result<()> {
             println!("no apps registered");
             return Ok(());
         }
-        for entry in entries {
-            println!("{:<20} {:<10} {}", entry.name, entry.state, entry.path);
+        for entry in &entries {
+            if entry.stale {
+                println!(
+                    "{:<20} {:<10} {} (path missing — run `adj prune`)",
+                    entry.name, "stale", entry.path
+                );
+            } else {
+                println!("{:<20} {:<10} {}", entry.name, entry.state, entry.path);
+            }
+        }
+    }
+    Ok(())
+}
+
+pub async fn remove(name: String) -> Result<()> {
+    let resp = into_error(request(Request::Remove { name }).await?)?;
+    if let Response::Removed { name } = resp {
+        println!("removed `{name}`");
+    }
+    Ok(())
+}
+
+pub async fn prune() -> Result<()> {
+    let resp = into_error(request(Request::Prune).await?)?;
+    if let Response::Pruned { removed } = resp {
+        if removed.is_empty() {
+            println!("nothing to prune");
+        } else {
+            for name in removed {
+                println!("pruned `{name}`");
+            }
         }
     }
     Ok(())

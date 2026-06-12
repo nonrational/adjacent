@@ -21,6 +21,10 @@ pub enum Request {
     /// `boot_timeout`.
     WaitReady { name: String, timeout_secs: u64 },
     Ping,
+    /// Delete one registry entry, stopping the app first if it is running.
+    Remove { name: String },
+    /// Delete every registry entry whose registered path no longer exists on disk.
+    Prune,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -32,6 +36,8 @@ pub enum Response {
     Status { name: String, state: AppState },
     LogPath { path: String },
     Error { message: String },
+    Removed { name: String },
+    Pruned { removed: Vec<String> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +45,10 @@ pub struct AppSummary {
     pub name: String,
     pub path: String,
     pub state: AppState,
+    /// True when the registered path no longer exists on disk (e.g. a deleted worktree).
+    /// Skipped on the wire when false so pre-stale daemons and clients interoperate.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stale: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -71,12 +81,13 @@ impl std::fmt::Display for AppState {
 /// Stable JSON shape for `adj list --json`. One entry per registered app.
 ///
 /// The shape is intentionally flat (no nested `state` object) to match the documented
-/// schema. `port` is present only when the app is running.
+/// schema. `port` is present only when the app is running. `stale` is present only when true.
 #[derive(Debug, Clone)]
 pub struct ListEntryDto<'a> {
     pub name: &'a str,
     pub path: &'a str,
     pub state: &'a AppState,
+    pub stale: bool,
 }
 
 impl<'a> Serialize for ListEntryDto<'a> {
@@ -88,6 +99,9 @@ impl<'a> Serialize for ListEntryDto<'a> {
         map.serialize_entry("state", state_tag(self.state))?;
         if let AppState::Running { port, .. } = self.state {
             map.serialize_entry("port", port)?;
+        }
+        if self.stale {
+            map.serialize_entry("stale", &true)?;
         }
         map.end()
     }

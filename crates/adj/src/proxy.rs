@@ -264,6 +264,15 @@ async fn ensure_running(
         Some(e) => e.clone(),
         None => return Err(ProxyError::NotRegistered),
     };
+    // A registered path can vanish out from under us (deleted worktree, deleted folder). Name
+    // the cause and the fix instead of letting read_app_config produce a confusing
+    // "no adjacent.toml found" boot failure.
+    if !entry.path.exists() {
+        return Err(ProxyError::Other(anyhow!(
+            "registered path {} no longer exists — run `adj prune`",
+            entry.path.display()
+        )));
+    }
     let cfg = registry::read_app_config(&entry.path).map_err(ProxyError::Other)?;
     if registry::base_name(name) != cfg.name {
         return Err(ProxyError::Other(anyhow!(

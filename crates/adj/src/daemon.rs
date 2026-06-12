@@ -177,6 +177,8 @@ async fn dispatch(
         Request::Status { name } => status(name, supervisor).await,
         Request::LogPath { name } => log_path(name).await,
         Request::WaitReady { name, timeout_secs } => wait_ready(name, timeout_secs, supervisor).await,
+        Request::Remove { name } => remove(name, supervisor, registry_lock).await,
+        Request::Prune => prune(supervisor, registry_lock).await,
     }
 }
 
@@ -302,9 +304,13 @@ async fn add(
     let _guard = registry_lock.lock().await;
     let mut reg = Registry::load()?;
     if reg.get(&key).is_some() {
-        return Err(anyhow!(
-            "an app named `{key}` is already registered (use `--label` to register another instance)"
-        ));
+        return Err(if label.is_some() {
+            anyhow!("an app named `{key}` is already registered — use a different `--label`")
+        } else {
+            anyhow!(
+                "an app named `{key}` is already registered (use `--label` to register another instance)"
+            )
+        });
     }
     reg.insert(
         key.clone(),
@@ -320,13 +326,21 @@ async fn add(
 }
 
 fn validate_label(label: &str) -> Result<()> {
+    // RFC 1035 DNS label limits: max 63 chars, no leading/trailing hyphen. The 63-char cap
+    // also keeps the per-instance log filename sane. `sanitize_label` on the client side
+    // trims and truncates, so this only rejects hand-supplied `--label` values that violate
+    // the constraints directly.
     let valid = !label.is_empty()
+        && label.len() <= 63
+        && !label.starts_with('-')
+        && !label.ends_with('-')
         && label
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
     if !valid {
         return Err(anyhow!(
-            "label `{label}` must be a DNS label: lowercase letters, digits, and `-` only"
+            "label `{label}` must be a DNS label: lowercase letters, digits, and `-` only, \
+             max 63 characters, no leading or trailing `-`"
         ));
     }
     Ok(())
@@ -341,6 +355,7 @@ async fn list(supervisor: Arc<Supervisor>) -> Result<Response> {
             name: name.clone(),
             path: entry.path.display().to_string(),
             state,
+            stale: !entry.path.exists(),
         });
     }
     Ok(Response::List { entries })
@@ -383,6 +398,16 @@ async fn restart(name: String, supervisor: Arc<Supervisor>) -> Result<Response> 
         .ok_or_else(|| anyhow!("no app named `{}`", name))?
         .clone();
     let cfg = registry::read_app_config(&entry.path)?;
+    // An instance key is `<label>.<cfg.name>`; only the base must match the manifest. A full
+    // equality check here would refuse to restart every registered worktree instance.
+    if registry::base_name(&name) != cfg.name {
+        return Err(anyhow!(
+            "adjacent.toml at {} declares name `{}`, which does not match `{}`",
+            entry.path.display(),
+            cfg.name,
+            name
+        ));
+    }
     supervisor.up(&name, entry.path, cfg).await?;
     Ok(Response::Ok)
 }
@@ -405,4 +430,55 @@ async fn log_path(name: String) -> Result<Response> {
     Ok(Response::LogPath {
         path: path.display().to_string(),
     })
+}
+
+async fn remove(
+    name: String,
+    supervisor: Arc<Supervisor>,
+    registry_lock: Arc<Mutex<()>>,
+) -> Result<Response> {
+    let _guard = registry_lock.lock().await;
+    let mut reg = Registry::load()?;
+    if reg.get(&name).is_none() {
+        return Err(anyhow!("no app named `{}`", name));
+    }
+    // Stop before deregistering so removal can't leave an orphan process running against an
+    // entry that no longer exists.
+    if matches!(
+        supervisor.state(&name).await,
+        adj_protocol::AppState::Running { .. }
+    ) {
+        supervisor.down(&name).await?;
+    }
+    reg.remove(&name);
+    reg.save()?;
+    Ok(Response::Removed { name })
+}
+
+async fn prune(supervisor: Arc<Supervisor>, registry_lock: Arc<Mutex<()>>) -> Result<Response> {
+    let _guard = registry_lock.lock().await;
+    let mut reg = Registry::load()?;
+    let stale: Vec<String> = reg
+        .apps
+        .iter()
+        .filter(|(_, entry)| !entry.path.exists())
+        .map(|(name, _)| name.clone())
+        .collect();
+    for name in &stale {
+        // A process can outlive its deleted cwd on unix, so a stale entry may still be
+        // running. Best-effort stop — a failure shouldn't block deregistering the corpse.
+        if matches!(
+            supervisor.state(name).await,
+            adj_protocol::AppState::Running { .. }
+        ) {
+            if let Err(err) = supervisor.down(name).await {
+                tracing::warn!("stopping stale `{name}` during prune failed: {err}");
+            }
+        }
+        reg.remove(name);
+    }
+    if !stale.is_empty() {
+        reg.save()?;
+    }
+    Ok(Response::Pruned { removed: stale })
 }

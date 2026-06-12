@@ -326,3 +326,119 @@ async fn detached_worktree_requires_explicit_label() {
 
     sandbox.stop_daemon().await;
 }
+
+#[tokio::test]
+async fn prune_clears_deleted_worktrees() {
+    let mut sandbox = Sandbox::new().await;
+    sandbox.start_daemon().await;
+
+    let repo = TempDir::new().expect("repo dir");
+    git(repo.path(), &["init", "-q"]).await;
+    write_echo_server(repo.path()).await;
+    write_app(repo.path(), "site").await;
+    git(repo.path(), &["add", "-A"]).await;
+    git(repo.path(), &["commit", "-q", "-m", "app skeleton"]).await;
+    write_marker(repo.path(), "from-main").await;
+
+    let wt_parent = TempDir::new().expect("wt parent");
+    let wt = wt_parent.path().join("wt");
+    git(
+        repo.path(),
+        &["worktree", "add", "-b", "feature-x", wt.to_str().unwrap()],
+    )
+    .await;
+    write_marker(&wt, "from-worktree").await;
+
+    for dir in [repo.path(), wt.as_path()] {
+        let add = sandbox.cmd().arg("add").arg(dir).output().await.expect("add");
+        assert!(add.status.success(), "add {dir:?}: {add:?}");
+    }
+
+    // Boot the instance once so prune also exercises the "still running" path.
+    let (s, _) = http_get_async(sandbox.proxy_port, "feature-x.site.adj.ac", "/").await;
+    assert!(s.contains(" 200 "), "pre-delete boot: {s}");
+
+    // Simulate the agent's branch merging: the worktree directory disappears.
+    std::fs::remove_dir_all(&wt).expect("delete worktree");
+
+    // list --json flags the dead entry; the healthy one carries no `stale` key.
+    let list = sandbox.cmd().args(["list", "--json"]).output().await.expect("list");
+    let entries: serde_json::Value =
+        serde_json::from_slice(&list.stdout).expect("parse list json");
+    let by_name = |name: &str| -> serde_json::Value {
+        entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == name)
+            .unwrap_or_else(|| panic!("no entry `{name}` in {entries}"))
+            .clone()
+    };
+    assert_eq!(by_name("feature-x.site")["stale"], serde_json::json!(true));
+    assert!(
+        by_name("site").get("stale").is_none(),
+        "healthy entry must not carry a stale key: {entries}"
+    );
+
+    // Requests to a stale entry get a 502 that names the fix.
+    let (stale_status, stale_body) =
+        http_get_async(sandbox.proxy_port, "feature-x.site.adj.ac", "/").await;
+    assert!(stale_status.contains(" 502 "), "stale status: {stale_status}");
+    assert!(stale_body.contains("adj prune"), "stale body: {stale_body}");
+
+    // Prune removes exactly the stale entry and reports it.
+    let prune = sandbox.cmd().arg("prune").output().await.expect("prune");
+    assert!(prune.status.success(), "prune: {prune:?}");
+    let prune_out = String::from_utf8_lossy(&prune.stdout);
+    assert!(prune_out.contains("feature-x.site"), "prune stdout: {prune_out}");
+
+    let list2 = sandbox.cmd().args(["list", "--json"]).output().await.expect("list2");
+    let entries2: serde_json::Value =
+        serde_json::from_slice(&list2.stdout).expect("parse list2 json");
+    let names: Vec<&str> = entries2
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["site"], "only the healthy app survives prune");
+
+    // A second prune is a no-op.
+    let prune2 = sandbox.cmd().arg("prune").output().await.expect("prune2");
+    let prune2_out = String::from_utf8_lossy(&prune2.stdout);
+    assert!(prune2_out.contains("nothing to prune"), "prune2: {prune2_out}");
+
+    let _ = sandbox.cmd().arg("down").arg("site").output().await;
+    sandbox.stop_daemon().await;
+}
+
+#[tokio::test]
+async fn remove_stops_and_deregisters_one_app() {
+    let mut sandbox = Sandbox::new().await;
+    sandbox.start_daemon().await;
+
+    let app_dir = TempDir::new().expect("app dir");
+    write_echo_server(app_dir.path()).await;
+    write_marker(app_dir.path(), "removable").await;
+    write_app(app_dir.path(), "gone").await;
+
+    let add = sandbox.cmd().arg("add").arg(app_dir.path()).output().await.expect("add");
+    assert!(add.status.success(), "add: {add:?}");
+
+    // Boot it so remove exercises the down-first path.
+    let (s, _) = http_get_async(sandbox.proxy_port, "gone.adj.ac", "/").await;
+    assert!(s.contains(" 200 "), "boot: {s}");
+
+    let rm = sandbox.cmd().arg("remove").arg("gone").output().await.expect("remove");
+    assert!(rm.status.success(), "remove: {rm:?}");
+    assert!(String::from_utf8_lossy(&rm.stdout).contains("gone"));
+
+    let (nf, _) = http_get_async(sandbox.proxy_port, "gone.adj.ac", "/").await;
+    assert!(nf.contains(" 404 "), "after remove: {nf}");
+
+    // Removing an unknown name is an error.
+    let rm2 = sandbox.cmd().arg("remove").arg("gone").output().await.expect("remove2");
+    assert!(!rm2.status.success(), "second remove must fail");
+
+    sandbox.stop_daemon().await;
+}
