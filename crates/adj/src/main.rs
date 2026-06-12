@@ -16,6 +16,7 @@ mod registry;
 mod status;
 mod supervisor;
 mod tls;
+mod worktree;
 
 #[derive(Parser)]
 #[command(

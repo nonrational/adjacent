@@ -96,8 +96,6 @@ impl Sandbox {
 
 /// Run git in `dir` with a hermetic identity so the test doesn't depend on (or trip over)
 /// the developer's global config — including gpg signing.
-// Task 4's tests consume this helper; allowed unused in Task 3.
-#[allow(dead_code)]
 async fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git")
         .arg("-C")
@@ -240,5 +238,87 @@ async fn label_flag_registers_routable_instance() {
     assert!(!bad.status.success(), "uppercase/underscore label must be rejected");
 
     let _ = sandbox.cmd().arg("down").arg("demo.site").output().await;
+    sandbox.stop_daemon().await;
+}
+
+#[tokio::test]
+async fn worktree_add_derives_label_from_branch() {
+    let mut sandbox = Sandbox::new().await;
+    sandbox.start_daemon().await;
+
+    // Main checkout: a real git repo whose committed tree carries adjacent.toml + server.py,
+    // so `git worktree add` materializes both in the linked worktree.
+    let repo = TempDir::new().expect("repo dir");
+    git(repo.path(), &["init", "-q"]).await;
+    write_echo_server(repo.path()).await;
+    write_app(repo.path(), "site").await;
+    git(repo.path(), &["add", "-A"]).await;
+    git(repo.path(), &["commit", "-q", "-m", "app skeleton"]).await;
+    // marker.txt stays untracked on purpose: each directory writes its own, which is how the
+    // assertions below tell the two instances apart.
+    write_marker(repo.path(), "from-main").await;
+
+    // Linked worktree on a branch that exercises sanitization (slash, underscore, caps).
+    let wt_parent = TempDir::new().expect("wt parent");
+    let wt = wt_parent.path().join("wt");
+    git(
+        repo.path(),
+        &["worktree", "add", "-b", "agents/Fix_Thing", wt.to_str().unwrap()],
+    )
+    .await;
+    write_marker(&wt, "from-worktree").await;
+
+    let add_main = sandbox.cmd().arg("add").arg(repo.path()).output().await.expect("add main");
+    assert!(add_main.status.success(), "add main: {add_main:?}");
+    let main_out = String::from_utf8_lossy(&add_main.stdout);
+    assert!(main_out.contains("`site`"), "main registered bare: {main_out}");
+
+    let add_wt = sandbox.cmd().arg("add").arg(&wt).output().await.expect("add wt");
+    assert!(add_wt.status.success(), "add wt: {add_wt:?}");
+    let wt_out = String::from_utf8_lossy(&add_wt.stdout);
+    assert!(
+        wt_out.contains("agents-fix-thing.site"),
+        "worktree registered as instance: {wt_out}"
+    );
+
+    let (s1, b1) = http_get_async(sandbox.proxy_port, "site.adj.ac", "/").await;
+    assert!(s1.contains(" 200 "), "main status: {s1}");
+    assert!(b1.contains("from-main"), "main body: {b1}");
+
+    let (s2, b2) =
+        http_get_async(sandbox.proxy_port, "agents-fix-thing.site.adj.ac", "/").await;
+    assert!(s2.contains(" 200 "), "worktree status: {s2}");
+    assert!(b2.contains("from-worktree"), "worktree body: {b2}");
+
+    let _ = sandbox.cmd().arg("down").arg("site").output().await;
+    let _ = sandbox.cmd().arg("down").arg("agents-fix-thing.site").output().await;
+    sandbox.stop_daemon().await;
+}
+
+#[tokio::test]
+async fn detached_worktree_requires_explicit_label() {
+    let mut sandbox = Sandbox::new().await;
+    sandbox.start_daemon().await;
+
+    let repo = TempDir::new().expect("repo dir");
+    git(repo.path(), &["init", "-q"]).await;
+    write_echo_server(repo.path()).await;
+    write_app(repo.path(), "site").await;
+    git(repo.path(), &["add", "-A"]).await;
+    git(repo.path(), &["commit", "-q", "-m", "app skeleton"]).await;
+
+    let wt_parent = TempDir::new().expect("wt parent");
+    let wt = wt_parent.path().join("wt");
+    git(
+        repo.path(),
+        &["worktree", "add", "--detach", wt.to_str().unwrap()],
+    )
+    .await;
+
+    let add = sandbox.cmd().arg("add").arg(&wt).output().await.expect("add");
+    assert!(!add.status.success(), "detached worktree add must fail");
+    let stderr = String::from_utf8_lossy(&add.stderr);
+    assert!(stderr.contains("--label"), "error should point at --label: {stderr}");
+
     sandbox.stop_daemon().await;
 }

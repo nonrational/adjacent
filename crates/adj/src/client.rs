@@ -8,6 +8,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use crate::paths;
+use crate::worktree;
 
 async fn connect() -> Result<UnixStream> {
     let socket = paths::socket_path()?;
@@ -51,6 +52,11 @@ pub async fn add(path: String, label: Option<String>) -> Result<()> {
     // not the daemon's. The daemon may have been launched from anywhere (or by launchd).
     let canon = std::fs::canonicalize(&path)
         .with_context(|| format!("resolving path {}", path))?;
+    // `--label` wins; otherwise a linked git worktree names its instance after the branch.
+    let label = match label {
+        Some(l) => Some(l),
+        None => worktree::detect_label(&canon)?,
+    };
     let resp = into_error(
         request(Request::Add {
             path: canon.display().to_string(),
