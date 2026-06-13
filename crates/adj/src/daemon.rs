@@ -65,21 +65,32 @@ pub async fn run() -> Result<()> {
         }
     });
 
-    // HTTPS listener and SAN re-issue share one resolver. Construction fails when the CA is
-    // missing — that's "HTTPS not opted in": skip the listener, and registry changes skip the
-    // leaf re-issue. Same degraded-not-fatal posture as before.
-    let resolver = match tls::LeafResolver::new() {
-        Ok(r) => Some(r),
-        Err(err) => {
-            tracing::error!("https listener disabled: {err}");
-            None
-        }
-    };
-    if let Some(resolver) = resolver.clone() {
+    // HTTPS listener and SAN re-issue share one resolver, published through a OnceLock the
+    // dispatch path reads. The resolver is built *inside* the spawned task because
+    // `LeafResolver::new()` hits the keychain, and keychain access can stall on a macOS
+    // "allow access" prompt (unsigned cargo-built binary — the hash changes every rebuild).
+    // Built synchronously here, a stalled prompt would hang the control socket and proxy too;
+    // built in the task, only HTTPS waits. Construction failure means "HTTPS not opted in"
+    // (no CA): skip the listener, and registry changes skip the leaf re-issue.
+    //
+    // Accepted race: an `add` landing between `LeafResolver::new()`'s registry read and the
+    // `set` below finds the cell empty and skips its reload, so the leaf stays stale until
+    // the next registry change. The window is one keychain roundtrip wide and self-corrects —
+    // not worth serializing daemon startup against the dispatch path.
+    let resolver: Arc<std::sync::OnceLock<Arc<tls::LeafResolver>>> =
+        Arc::new(std::sync::OnceLock::new());
+    {
+        let cell = resolver.clone();
         let https_supervisor = supervisor.clone();
         tokio::spawn(async move {
-            if let Err(err) = proxy::run_https(https_supervisor, resolver).await {
-                tracing::error!("https listener exited: {err}");
+            match tls::LeafResolver::new() {
+                Ok(r) => {
+                    let _ = cell.set(r.clone());
+                    if let Err(err) = proxy::run_https(https_supervisor, r).await {
+                        tracing::error!("https listener exited: {err}");
+                    }
+                }
+                Err(err) => tracing::error!("https listener disabled: {err}"),
             }
         });
     }
@@ -133,7 +144,7 @@ async fn handle_client(
     stream: UnixStream,
     supervisor: Arc<Supervisor>,
     registry_lock: Arc<Mutex<()>>,
-    resolver: Option<Arc<tls::LeafResolver>>,
+    resolver: Arc<std::sync::OnceLock<Arc<tls::LeafResolver>>>,
 ) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -178,7 +189,7 @@ async fn dispatch(
     req: Request,
     supervisor: Arc<Supervisor>,
     registry_lock: Arc<Mutex<()>>,
-    resolver: Option<Arc<tls::LeafResolver>>,
+    resolver: Arc<std::sync::OnceLock<Arc<tls::LeafResolver>>>,
 ) -> Result<Response> {
     match req {
         Request::Ping => Ok(Response::Ok),
@@ -281,7 +292,7 @@ async fn add(
     path: String,
     label: Option<String>,
     registry_lock: Arc<Mutex<()>>,
-    resolver: Option<Arc<tls::LeafResolver>>,
+    resolver: Arc<std::sync::OnceLock<Arc<tls::LeafResolver>>>,
 ) -> Result<Response> {
     // The client canonicalizes against the user's CWD before sending. We require absolute
     // paths here so we never silently resolve against the daemon's CWD.
@@ -335,8 +346,8 @@ async fn add(
     reg.save()?;
     // Best-effort: a failed re-issue means HTTPS serves the previous SAN set until the next
     // registry change; the registry mutation itself already succeeded.
-    if let Some(resolver) = &resolver {
-        if let Err(err) = resolver.reload() {
+    if let Some(r) = resolver.get() {
+        if let Err(err) = r.reload() {
             tracing::warn!("leaf cert re-issue after registry change failed: {err}");
         }
     }
@@ -457,7 +468,7 @@ async fn remove(
     name: String,
     supervisor: Arc<Supervisor>,
     registry_lock: Arc<Mutex<()>>,
-    resolver: Option<Arc<tls::LeafResolver>>,
+    resolver: Arc<std::sync::OnceLock<Arc<tls::LeafResolver>>>,
 ) -> Result<Response> {
     let _guard = registry_lock.lock().await;
     let mut reg = Registry::load()?;
@@ -486,8 +497,8 @@ async fn remove(
     reg.save()?;
     // Best-effort: a failed re-issue means HTTPS serves the previous SAN set until the next
     // registry change; the registry mutation itself already succeeded.
-    if let Some(resolver) = &resolver {
-        if let Err(err) = resolver.reload() {
+    if let Some(r) = resolver.get() {
+        if let Err(err) = r.reload() {
             tracing::warn!("leaf cert re-issue after registry change failed: {err}");
         }
     }
@@ -497,7 +508,7 @@ async fn remove(
 async fn prune(
     supervisor: Arc<Supervisor>,
     registry_lock: Arc<Mutex<()>>,
-    resolver: Option<Arc<tls::LeafResolver>>,
+    resolver: Arc<std::sync::OnceLock<Arc<tls::LeafResolver>>>,
 ) -> Result<Response> {
     let _guard = registry_lock.lock().await;
     let mut reg = Registry::load()?;
@@ -528,8 +539,8 @@ async fn prune(
         reg.save()?;
         // Best-effort: a failed re-issue means HTTPS serves the previous SAN set until the next
         // registry change; the registry mutation itself already succeeded.
-        if let Some(resolver) = &resolver {
-            if let Err(err) = resolver.reload() {
+        if let Some(r) = resolver.get() {
+            if let Err(err) = r.reload() {
                 tracing::warn!("leaf cert re-issue after registry change failed: {err}");
             }
         }

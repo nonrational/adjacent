@@ -127,12 +127,22 @@ pub fn ca_exists() -> Result<bool> {
 
 /// Serves the daemon's leaf cert and re-issues it when the registry's SAN set changes, so a
 /// newly added worktree instance gets a valid cert without an HTTPS-listener restart.
+///
+/// SANs and key live in one lock so a reader can never observe a key paired with the wrong
+/// SAN set — two separate locks would rely on every reload call site being externally
+/// serialized. Concurrent reloads may both re-issue (a wasted keychain signature, but a
+/// correct outcome): each writer installs its own matching sans+key pair, last writer wins.
 #[derive(Debug)]
 pub struct LeafResolver {
-    current: RwLock<Arc<CertifiedKey>>,
-    /// SANs baked into `current`; compared on reload so an unchanged registry skips the
+    state: RwLock<LeafState>,
+}
+
+#[derive(Debug)]
+struct LeafState {
+    /// SANs baked into `key`; compared on reload so an unchanged registry skips the
     /// keychain signature entirely.
-    sans: RwLock<Vec<String>>,
+    sans: Vec<String>,
+    key: Arc<CertifiedKey>,
 }
 
 impl LeafResolver {
@@ -145,29 +155,37 @@ impl LeafResolver {
             ));
         }
         let sans = registry_sans(&Registry::load()?);
-        let key = certified_key_for(&sans)?;
+        let key = Arc::new(certified_key_for(&sans)?);
         Ok(Arc::new(Self {
-            current: RwLock::new(Arc::new(key)),
-            sans: RwLock::new(sans),
+            state: RwLock::new(LeafState { sans, key }),
         }))
     }
 
     /// Recompute the SAN set from the registry; re-issue and swap the served cert if changed.
+    /// The keychain signature happens outside the lock so a slow (or prompting) keychain
+    /// never blocks `resolve()` on the TLS hot path.
     pub fn reload(&self) -> Result<()> {
         let sans = registry_sans(&Registry::load()?);
-        if *self.sans.read().expect("sans lock") == sans {
+        if self.state.read().expect("leaf state lock").sans == sans {
             return Ok(());
         }
-        let key = certified_key_for(&sans)?;
-        *self.current.write().expect("cert lock") = Arc::new(key);
-        *self.sans.write().expect("sans lock") = sans;
+        let key = Arc::new(certified_key_for(&sans)?);
+        *self.state.write().expect("leaf state lock") = LeafState { sans, key };
         Ok(())
+    }
+
+    /// DER of the leaf currently served to clients, for tests pinning hot-swap behavior.
+    #[cfg(test)]
+    fn current_cert_der(&self) -> Vec<u8> {
+        self.state.read().expect("leaf state lock").key.cert[0]
+            .as_ref()
+            .to_vec()
     }
 }
 
 impl ResolvesServerCert for LeafResolver {
     fn resolve(&self, _hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        Some(self.current.read().expect("cert lock").clone())
+        Some(self.state.read().expect("leaf state lock").key.clone())
     }
 }
 
@@ -203,8 +221,10 @@ fn ensure_leaf(sans: &[String]) -> Result<(String, String)> {
             .with_context(|| format!("reading {}", cert_path.display()))?;
         let key = fs::read_to_string(&key_path)
             .with_context(|| format!("reading {}", key_path.display()))?;
-        if leaf_covers(&cert, sans)? {
-            return Ok((cert, key));
+        // A corrupt cached leaf should heal via re-issue, not wedge HTTPS forever on a parse error.
+        match leaf_covers(&cert, sans) {
+            Ok(true) => return Ok((cert, key)),
+            Ok(false) | Err(_) => {}
         }
     }
     issue_leaf(sans)
@@ -474,6 +494,45 @@ mod tests {
             assert_ne!(pem1, pem2, "SAN change must re-issue the leaf");
             assert!(leaf_covers(&pem2, &widened).expect("parse"));
             assert!(!leaf_covers(&pem2, &base).expect("parse"));
+        });
+    }
+
+    /// Pins that `reload()` actually changes what `resolve()` serves: the resolver's held
+    /// `CertifiedKey` must swap when the registry's SAN set widens, without an HTTPS restart.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reload_swaps_served_cert_when_registry_changes() {
+        use crate::registry::AppEntry;
+        fn dns_sans(der: &[u8]) -> Vec<String> {
+            let (_, cert) = x509_parser::parse_x509_certificate(der).expect("x509");
+            cert.subject_alternative_name()
+                .expect("SAN lookup")
+                .map(|ext| {
+                    ext.value
+                        .general_names
+                        .iter()
+                        .filter_map(|gn| match gn {
+                            x509_parser::extensions::GeneralName::DNSName(n) => {
+                                Some(n.to_string())
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        with_temp_home(|| {
+            generate_ca().expect("generate_ca");
+            let resolver = LeafResolver::new().expect("resolver");
+            let before = resolver.current_cert_der();
+            let mut reg = Registry::default();
+            reg.insert("feature-x.site".into(), AppEntry { path: "/tmp/a".into() });
+            reg.save().expect("save registry");
+            resolver.reload().expect("reload");
+            let after = resolver.current_cert_der();
+            let wildcard = "*.site.adj.ac".to_string();
+            assert!(!dns_sans(&before).contains(&wildcard), "old cert must not cover it");
+            assert!(dns_sans(&after).contains(&wildcard), "reload must swap in the new leaf");
         });
     }
 
