@@ -257,7 +257,36 @@ async fn idle_scanner(supervisor: Arc<Supervisor>) {
     loop {
         tokio::time::sleep(IDLE_SCAN_INTERVAL).await;
         let candidates = supervisor.idle_candidates().await;
+        if candidates.is_empty() {
+            continue;
+        }
+        // Load the registry once per sweep to spot deregistered-but-running apps. A `remove`/
+        // `prune` racing the proxy's lock-free lazy boot (or a `down` that missed its grace
+        // window) can leave a Running runtime entry with no registry row. Such an app is
+        // unreachable — the proxy 404s an unregistered host — and, if its idle_timeout is `"off"`,
+        // the window check below never fires, so without this it would leak forever. Reaping it
+        // here is the backstop `forget`/`remove`/`prune` document. A load error must NOT be read
+        // as "nothing is registered" (that would reap every running app), so we only reap when
+        // the load succeeds.
+        let registered = Registry::load().map(|reg| {
+            reg.apps
+                .into_keys()
+                .collect::<std::collections::HashSet<String>>()
+        });
+        if let Err(err) = &registered {
+            tracing::warn!("idle scanner could not load registry: {err}");
+        }
         for (name, idle_for, idle_timeout) in candidates {
+            if let Ok(registered) = &registered {
+                if !registered.contains(&name) {
+                    tracing::info!("reaping deregistered-but-running `{name}`");
+                    if let Err(err) = supervisor.down(&name).await {
+                        tracing::warn!("reaping deregistered `{name}` failed: {err}");
+                    }
+                    supervisor.forget(&name).await;
+                    continue;
+                }
+            }
             let Some(window) = idle_timeout else {
                 continue;
             };
@@ -479,22 +508,26 @@ async fn remove(
         return Err(anyhow!("no app named `{}`", name));
     }
     // Stop before deregistering so removal can't leave an orphan process running against an
-    // entry that no longer exists.
+    // entry that no longer exists. Best-effort: a process that ignores SIGTERM+SIGKILL past the
+    // grace window shouldn't abort deregistration and strand the registry entry too — the idle
+    // scanner reaps any still-running deregistered app on its next sweep (see `idle_scanner`).
     if matches!(
         supervisor.state(&name).await,
         adj_protocol::AppState::Running { .. }
     ) {
-        supervisor.down(&name).await?;
+        if let Err(err) = supervisor.down(&name).await {
+            tracing::warn!("stopping `{name}` during remove failed: {err}");
+        }
     }
     // Clear the supervisor's AppRuntime so a subsequent `adj add` + boot sees a clean Stopped
     // slate rather than the last run's state (e.g. Crashed from a previous life of the app).
     //
     // Known race: the proxy's `ensure_running` reads the registry *without* the registry lock,
     // so a request racing `remove` can lazy-boot the app back between our `down` and the
-    // `reg.save()` below. `forget` refuses to drop a Running entry for exactly this reason —
-    // the resurrected process stays in the supervisor map where the idle scanner can reap it,
-    // and `adj down <name>` still works because `down` operates on supervisor state, not the
-    // registry. Accepted for a local dev tool over giving the proxy a registry-lock dependency.
+    // `reg.save()` below. `forget` refuses to drop a Running entry for exactly this reason — and
+    // once `reg.save()` drops the registry row, the idle scanner reaps that now-unregistered
+    // Running app on its next sweep regardless of its idle_timeout (`"off"` included). `adj down
+    // <name>` also still works because `down` operates on supervisor state, not the registry.
     supervisor.forget(&name).await;
     reg.remove(&name);
     reg.save()?;
@@ -515,10 +548,14 @@ async fn prune(
 ) -> Result<Response> {
     let _guard = registry_lock.lock().await;
     let mut reg = Registry::load()?;
+    // Only prune entries we can positively confirm are gone. `try_exists()` distinguishes
+    // "definitely absent" (Ok(false)) from "can't tell" (Err: unmounted network volume, EACCES
+    // on a parent dir, broken symlink) — bare `exists()` collapses both to false and would
+    // silently deregister a still-valid app whose path is merely transiently unreachable.
     let stale: Vec<String> = reg
         .apps
         .iter()
-        .filter(|(_, entry)| !entry.path.exists())
+        .filter(|(_, entry)| matches!(entry.path.try_exists(), Ok(false)))
         .map(|(name, _)| name.clone())
         .collect();
     for name in &stale {
@@ -534,7 +571,8 @@ async fn prune(
         }
         // Same ghost-state cleanup as remove: drop the AppRuntime so re-adding the same path
         // later doesn't inherit the old run's state. The same resurrection race documented on
-        // `remove` applies here; the idle scanner is the backstop.
+        // `remove` applies here; the idle scanner reaps any still-running deregistered app on
+        // its next sweep regardless of idle_timeout.
         supervisor.forget(name).await;
         reg.remove(name);
     }

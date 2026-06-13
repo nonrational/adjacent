@@ -574,3 +574,65 @@ async fn agent_instructions_prefers_registered_label_over_branch() {
     let _ = sandbox.cmd().arg("down").arg("prod.site").output().await;
     sandbox.stop_daemon().await;
 }
+
+#[tokio::test]
+async fn idle_scanner_reaps_deregistered_running_app() {
+    // Backstop for the remove/prune resurrection race: a Running app whose registry row has gone
+    // away must be reaped even when idle_timeout is "off" (the idle window never fires). Simulate
+    // the post-deregistration state by dropping the registry row out from under a live process,
+    // then assert the scanner stops it. Without the backstop an idle-off orphan leaks forever.
+    let mut sandbox = Sandbox::new().await;
+    sandbox.start_daemon().await;
+
+    let app_dir = TempDir::new().expect("app dir");
+    write_echo_server(app_dir.path()).await;
+    write_marker(app_dir.path(), "orphan").await;
+    // idle_timeout = "off" so the orphan backstop is the ONLY thing that can stop it.
+    tokio::fs::write(
+        app_dir.path().join("adjacent.toml"),
+        "name = \"ghost\"\ncmd = \"exec /usr/bin/python3 server.py\"\nidle_timeout = \"off\"\n",
+    )
+    .await
+    .expect("write toml");
+
+    let add = sandbox.cmd().arg("add").arg(app_dir.path()).output().await.expect("add");
+    assert!(add.status.success(), "add: {add:?}");
+
+    // Boot it.
+    let (s, _) = http_get_async(sandbox.proxy_port, "ghost.adj.ac", "/").await;
+    assert!(s.contains(" 200 "), "boot: {s}");
+
+    // Drop the registry row directly, leaving the supervisor with a Running entry and no registry
+    // backing — the exact state the documented resurrection race produces.
+    let registry_path = sandbox.home_path.join("registry.toml");
+    tokio::fs::write(&registry_path, "").await.expect("truncate registry");
+
+    // Give the 500ms scanner several sweeps to observe the unregistered-but-running app and reap
+    // it, then re-register the same directory so `status` (which requires a registry row) can read
+    // the supervisor's post-reap state.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let readd = sandbox.cmd().arg("add").arg(app_dir.path()).output().await.expect("re-add");
+    assert!(readd.status.success(), "re-add: {readd:?}");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let out = sandbox
+            .cmd()
+            .args(["status", "ghost", "--json"])
+            .output()
+            .await
+            .expect("status");
+        let v: serde_json::Value =
+            serde_json::from_slice(&out.stdout).unwrap_or_else(|_| serde_json::json!({}));
+        if v["state"] == "stopped" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "scanner did not reap the deregistered idle-off app: {v}"
+        );
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+
+    sandbox.stop_daemon().await;
+}

@@ -337,9 +337,11 @@ impl Supervisor {
     /// idle scanner's reach. Returns whether the entry is gone (true if removed or never present).
     ///
     /// Callers don't need to act on the bool for correctness: if a Running entry survives here
-    /// because of the resurrection race, the idle scanner's next sweep will reap it once the
-    /// app goes quiet. `adj down <name>` also still works because `down` never consults the
-    /// registry directly — it operates purely on supervisor state.
+    /// because of the resurrection race, the idle scanner's next sweep reaps it once its registry
+    /// row is gone — regardless of the app's idle_timeout (`"off"` included), since the scanner
+    /// treats any running-but-unregistered app as an orphan. `adj down <name>` also still works
+    /// because `down` never consults the registry directly — it operates purely on supervisor
+    /// state.
     ///
     /// Port reservations are not leaked: the wait task that observes process exit already
     /// calls `reserved_ports.remove(&port)` unconditionally, so by the time a non-Running
