@@ -399,6 +399,14 @@ async fn up(name: String, supervisor: Arc<Supervisor>) -> Result<Response> {
         .get(&name)
         .ok_or_else(|| anyhow!("no app named `{}`", name))?
         .clone();
+    // Give the same curated error the proxy gives rather than letting read_app_config emit a
+    // confusing "no adjacent.toml found" when the worktree or folder has been deleted.
+    if !entry.path.exists() {
+        return Err(anyhow!(
+            "registered path {} no longer exists — run `adj prune`",
+            entry.path.display()
+        ));
+    }
     let cfg = registry::read_app_config(&entry.path)?;
     // An instance key is `<label>.<cfg.name>`; only the base must match the manifest. A full
     // equality check here would refuse to boot every registered worktree instance.
@@ -429,6 +437,14 @@ async fn restart(name: String, supervisor: Arc<Supervisor>) -> Result<Response> 
         .get(&name)
         .ok_or_else(|| anyhow!("no app named `{}`", name))?
         .clone();
+    // Give the same curated error the proxy gives rather than letting read_app_config emit a
+    // confusing "no adjacent.toml found" when the worktree or folder has been deleted.
+    if !entry.path.exists() {
+        return Err(anyhow!(
+            "registered path {} no longer exists — run `adj prune`",
+            entry.path.display()
+        ));
+    }
     let cfg = registry::read_app_config(&entry.path)?;
     // An instance key is `<label>.<cfg.name>`; only the base must match the manifest. A full
     // equality check here would refuse to restart every registered worktree instance.

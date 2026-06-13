@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 
 use crate::registry;
+use crate::worktree;
 
 /// Print a markdown steering doc telling AI coding agents how to interact with the
 /// Adjacent-supervised app at `path` (or the current directory when `path` is `None`).
@@ -15,7 +16,16 @@ pub fn emit(path: Option<String>) -> Result<()> {
         None => std::env::current_dir().context("resolving current directory")?,
     };
     let cfg = registry::read_app_config(&dir)?;
-    print!("{}", render(&cfg.name, &cfg.cmd));
+    // The key the agent's directory was (or will be) registered under determines which instance
+    // adj commands and URLs should target. A linked worktree registers as `<label>.<name>` —
+    // using the bare `cfg.name` here would steer the agent at the main checkout's instance.
+    // We derive the key the same way `client::add` does so the doc stays in sync with reality.
+    // Propagate errors from detect_label (detached HEAD, git failure) — same contract as `adj add`.
+    let key = match worktree::detect_label(&dir)? {
+        Some(label) => format!("{label}.{}", cfg.name),
+        None => cfg.name.clone(),
+    };
+    print!("{}", render(&key, &cfg.cmd));
     Ok(())
 }
 
