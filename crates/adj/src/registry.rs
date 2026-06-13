@@ -137,6 +137,9 @@ pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// Parse the `idle_timeout` TOML field. Accepts `"15m"`, `"30s"`, `"1h"`, `"500ms"`, or
 /// `"off"` (case-insensitive) to disable idle shutdown. Returns `Ok(None)` for `"off"`.
+/// Zero durations are rejected: a zero window would make the app a permanent shutdown
+/// candidate (stopped on every scan tick), and users writing `"0s"` almost always mean
+/// "disable" — which is what `"off"` does.
 pub fn parse_idle_timeout(raw: &str) -> Result<Option<Duration>> {
     let s = raw.trim();
     if s.eq_ignore_ascii_case("off") || s.eq_ignore_ascii_case("disabled") {
@@ -161,15 +164,32 @@ pub fn parse_idle_timeout(raw: &str) -> Result<Option<Duration>> {
         "h" => Duration::from_secs(n * 60 * 60),
         other => return Err(anyhow!("unknown duration unit `{}`", other)),
     };
+    if dur.is_zero() {
+        return Err(anyhow!(
+            "idle_timeout of zero would stop the app on every idle scan; use `off` to disable idle shutdown"
+        ));
+    }
     Ok(Some(dur))
 }
 
 /// Resolve `idle_timeout` to a Duration, applying the default when unset. Returns `None` when
-/// idle shutdown is disabled (`"off"`).
+/// idle shutdown is disabled (`"off"`). Invalid values warn and fall back to the default
+/// rather than erroring — see the comment on the parse arm below.
 pub fn idle_timeout_for(cfg: &AppConfig) -> Option<Duration> {
     match cfg.idle_timeout.as_deref() {
         None => Some(DEFAULT_IDLE_TIMEOUT),
-        Some(s) => parse_idle_timeout(s).unwrap_or(Some(DEFAULT_IDLE_TIMEOUT)),
+        // Unreachable when callers go through `read_app_config`, which validates eagerly.
+        // Warn loudly anyway so a future code path that skips validation can't turn a
+        // config typo into a silent default.
+        Some(s) => parse_idle_timeout(s).unwrap_or_else(|err| {
+            tracing::warn!(
+                idle_timeout = s,
+                error = %err,
+                default = ?DEFAULT_IDLE_TIMEOUT,
+                "invalid idle_timeout; falling back to default"
+            );
+            Some(DEFAULT_IDLE_TIMEOUT)
+        }),
     }
 }
 
@@ -190,6 +210,80 @@ mod tests {
         assert_eq!(parse_idle_timeout("off").unwrap(), None);
         assert_eq!(parse_idle_timeout("OFF").unwrap(), None);
         assert_eq!(parse_idle_timeout("disabled").unwrap(), None);
+    }
+
+    fn cfg_with_idle_timeout(idle_timeout: Option<&str>) -> AppConfig {
+        AppConfig {
+            name: "test".into(),
+            cmd: "true".into(),
+            port_env: None,
+            env: None,
+            env_file: None,
+            boot_timeout: None,
+            health_check_url: None,
+            idle_timeout: idle_timeout.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn idle_timeout_for_resolves_unset_valid_and_off() {
+        assert_eq!(idle_timeout_for(&cfg_with_idle_timeout(None)), Some(DEFAULT_IDLE_TIMEOUT));
+        assert_eq!(
+            idle_timeout_for(&cfg_with_idle_timeout(Some("30s"))),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(idle_timeout_for(&cfg_with_idle_timeout(Some("off"))), None);
+    }
+
+    #[test]
+    fn idle_timeout_for_warns_and_falls_back_to_default_on_parse_failure() {
+        // The old `unwrap_or` returned the same value on parse failure; the warn is the only
+        // observable difference, so capture the subscriber output and pin both.
+        #[derive(Clone, Default)]
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+            type Writer = Capture;
+            fn make_writer(&'a self) -> Capture {
+                self.clone()
+            }
+        }
+
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .finish();
+        let resolved = tracing::subscriber::with_default(subscriber, || {
+            idle_timeout_for(&cfg_with_idle_timeout(Some("10x")))
+        });
+
+        assert_eq!(resolved, Some(DEFAULT_IDLE_TIMEOUT));
+        let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            logs.contains("invalid idle_timeout") && logs.contains("10x") && logs.contains("900s"),
+            "expected a warn naming the bad value and the default it fell back to, got: {logs}"
+        );
+    }
+
+    #[test]
+    fn rejects_zero_and_points_at_off() {
+        for raw in ["0s", "0ms", "0m", "0h"] {
+            let err = parse_idle_timeout(raw).unwrap_err();
+            assert!(
+                err.to_string().contains("use `off`"),
+                "error for {:?} should suggest `off`, got: {}",
+                raw,
+                err
+            );
+        }
     }
 
     #[test]
