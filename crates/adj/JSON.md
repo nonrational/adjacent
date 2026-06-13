@@ -16,8 +16,7 @@ A registered app is in one of three states:
 
 ## `adj list --json`
 
-A JSON array of entries, one per registered app. Optional fields are present only when
-meaningful for the current state.
+A JSON array of entries, one per registered app. Optional fields are present only when meaningful.
 
 ```json
 [

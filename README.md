@@ -68,8 +68,8 @@ Four agents in four git worktrees of the same repo can all register. `adj add` i
 linked worktree names the instance after its branch: the worktree of `site` on branch
 `feature-x` serves at `feature-x.site.adj.ac`, while the main checkout keeps `site.adj.ac`.
 No flags needed (`--label` overrides the branch name); each worktree gets its own process,
-port and logs. When a worktree is deleted, `adj list` flags the leftover entry as stale and
-`adj prune` clears them all.
+port and logs. When a worktree is deleted, `adj list` flags leftover entries as stale and
+`adj prune` clears them.
 
 ## Agent Integration
 

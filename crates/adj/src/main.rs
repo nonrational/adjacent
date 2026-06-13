@@ -43,7 +43,7 @@ enum Cmd {
     },
     /// List registered apps and their state.
     List {
-        /// Emit a JSON array of `{name, path, state, port?}` instead of the human view.
+        /// Emit a JSON array of `{name, path, state, port?, stale?}` instead of the human view.
         #[arg(long)]
         json: bool,
     },
