@@ -99,6 +99,32 @@ pub fn base_name(key: &str) -> &str {
     split_key(key).1
 }
 
+/// Validate that `value` is a usable DNS label: 1–63 chars, lowercase ASCII letters/digits/`-`,
+/// no leading or trailing `-`. `kind` names the thing being validated for the error message
+/// (`"app name"` / `"label"`).
+///
+/// Both the app name and a worktree label become DNS labels in `<label>.<name>.adj.ac` *and*
+/// land verbatim in the TLS leaf's `*.<name>.adj.ac` SAN. The proxy lowercases the request
+/// host, and rcgen encodes SANs as IA5Strings (ASCII-only), so a name that isn't already a
+/// clean DNS label would register fine but then 404 at the proxy or fail leaf issuance — and a
+/// single failed issuance disables HTTPS daemon-wide. Reject at the trust boundary instead.
+pub fn validate_dns_label(kind: &str, value: &str) -> Result<()> {
+    let valid = !value.is_empty()
+        && value.len() <= 63
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+        && value
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !valid {
+        return Err(anyhow!(
+            "{kind} `{value}` must be a DNS label: lowercase letters, digits, and `-` only, \
+             max 63 characters, no leading or trailing `-`"
+        ));
+    }
+    Ok(())
+}
+
 pub fn read_app_config(dir: &Path) -> Result<AppConfig> {
     let manifest = dir.join("adjacent.toml");
     if !manifest.exists() {
@@ -112,13 +138,17 @@ pub fn read_app_config(dir: &Path) -> Result<AppConfig> {
         return Err(anyhow!("adjacent.toml is missing a non-empty `name`"));
     }
     // Dots are structural in registry keys (`<label>.<name>` is a worktree instance), so a
-    // dotted app name would make `feature-x.site` ambiguous. Reject at the source.
+    // dotted app name would make `feature-x.site` ambiguous. Checked before the general
+    // DNS-label check so the dot case gets its own targeted message.
     if cfg.name.contains('.') {
         return Err(anyhow!(
             "app name `{}` contains `.` — dots are reserved for worktree instances (`<label>.<name>`)",
             cfg.name
         ));
     }
+    // The name becomes a DNS label in `<name>.adj.ac` and a SAN in the TLS leaf, so it must be
+    // a clean DNS label or it 404s at the proxy / breaks leaf issuance. See `validate_dns_label`.
+    validate_dns_label("app name", &cfg.name)?;
     if cfg.cmd.trim().is_empty() {
         return Err(anyhow!("adjacent.toml is missing a non-empty `cmd`"));
     }
@@ -313,6 +343,38 @@ mod tests {
         .expect("write toml");
         let err = read_app_config(tmp.path()).unwrap_err();
         assert!(format!("{err:#}").contains('.'), "error should mention the dot: {err:#}");
+    }
+
+    #[test]
+    fn read_app_config_rejects_non_dns_names() {
+        // A non-ASCII name registers fine pre-validation, then poisons the shared TLS leaf's SAN
+        // set (rcgen IA5String rejects non-ASCII) — disabling HTTPS daemon-wide. Reject it here.
+        for bad in ["café", "My App", "UPPER", "-lead", "trail-"] {
+            let tmp = tempfile::TempDir::new().expect("tempdir");
+            std::fs::write(
+                tmp.path().join("adjacent.toml"),
+                format!("name = \"{bad}\"\ncmd = \"true\"\n"),
+            )
+            .expect("write toml");
+            let err = read_app_config(tmp.path()).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("DNS label"),
+                "name `{bad}` should be rejected as a non-DNS label: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn read_app_config_accepts_valid_dns_names() {
+        for ok in ["site", "feature-x", "api2", "a"] {
+            let tmp = tempfile::TempDir::new().expect("tempdir");
+            std::fs::write(
+                tmp.path().join("adjacent.toml"),
+                format!("name = \"{ok}\"\ncmd = \"true\"\n"),
+            )
+            .expect("write toml");
+            assert!(read_app_config(tmp.path()).is_ok(), "name `{ok}` should be accepted");
+        }
     }
 
     #[test]

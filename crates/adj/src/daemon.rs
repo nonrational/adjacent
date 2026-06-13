@@ -358,24 +358,11 @@ async fn add(
 }
 
 fn validate_label(label: &str) -> Result<()> {
-    // RFC 1035 DNS label limits: max 63 chars, no leading/trailing hyphen. The 63-char cap
-    // also keeps the per-instance log filename sane. `sanitize_label` on the client side
-    // trims and truncates, so this only rejects hand-supplied `--label` values that violate
-    // the constraints directly.
-    let valid = !label.is_empty()
-        && label.len() <= 63
-        && !label.starts_with('-')
-        && !label.ends_with('-')
-        && label
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-    if !valid {
-        return Err(anyhow!(
-            "label `{label}` must be a DNS label: lowercase letters, digits, and `-` only, \
-             max 63 characters, no leading or trailing `-`"
-        ));
-    }
-    Ok(())
+    // A worktree label has the same DNS-label constraints as an app name (both become labels in
+    // `<label>.<name>.adj.ac` and SANs in the TLS leaf). `sanitize_label` on the client side
+    // trims and truncates, so this only rejects hand-supplied `--label` values that violate the
+    // constraints directly.
+    registry::validate_dns_label("label", label)
 }
 
 async fn list(supervisor: Arc<Supervisor>) -> Result<Response> {
