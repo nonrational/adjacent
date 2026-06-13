@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -16,17 +16,41 @@ pub fn emit(path: Option<String>) -> Result<()> {
         None => std::env::current_dir().context("resolving current directory")?,
     };
     let cfg = registry::read_app_config(&dir)?;
-    // The key the agent's directory was (or will be) registered under determines which instance
-    // adj commands and URLs should target. A linked worktree registers as `<label>.<name>` —
-    // using the bare `cfg.name` here would steer the agent at the main checkout's instance.
-    // We derive the key the same way `client::add` does so the doc stays in sync with reality.
-    // Propagate errors from detect_label (detached HEAD, git failure) — same contract as `adj add`.
-    let key = match worktree::detect_label(&dir)? {
-        Some(label) => format!("{label}.{}", cfg.name),
-        None => cfg.name.clone(),
+    // Steer the agent at the instance key the daemon will actually route to. Prefer the key this
+    // directory is registered under: an explicit `adj add --label` can differ from the branch,
+    // and re-deriving from the branch here would point every command and URL at an unregistered
+    // instance. Only when the dir isn't registered yet (the pre-`adj add` bootstrap case) do we
+    // fall back to deriving the worktree label the same way `client::add` would.
+    let key = match registered_key(&dir, &cfg.name) {
+        Some(k) => k,
+        None => derive_key(&dir, &cfg.name)?,
     };
     print!("{}", render(&key, &cfg.cmd));
     Ok(())
+}
+
+/// The registry key whose entry points at `dir`, if this directory is registered. Matches on the
+/// canonical path (registry entries are stored canonical) and restricts to keys whose base equals
+/// the manifest `name`, so a stale entry for a different app at a reused path can't mislabel the
+/// doc. Returns `None` — falling back to derivation — when the dir isn't registered or the
+/// registry can't be read.
+fn registered_key(dir: &Path, name: &str) -> Option<String> {
+    let canon = std::fs::canonicalize(dir).ok()?;
+    let reg = registry::Registry::load().ok()?;
+    reg.apps
+        .iter()
+        .find(|(key, entry)| entry.path == canon && registry::base_name(key) == name)
+        .map(|(key, _)| key.clone())
+}
+
+/// Derive the key `client::add` would assign when the dir is not yet registered: a linked
+/// worktree's branch label, else the bare name. Propagates `detect_label` errors (detached HEAD,
+/// git failure) so the bootstrap case surfaces the same guidance `adj add` would.
+fn derive_key(dir: &Path, name: &str) -> Result<String> {
+    Ok(match worktree::detect_label(dir)? {
+        Some(label) => format!("{label}.{name}"),
+        None => name.to_string(),
+    })
 }
 
 fn render(name: &str, cmd: &str) -> String {

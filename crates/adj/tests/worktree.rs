@@ -510,3 +510,67 @@ async fn removed_app_reregisters_with_clean_state() {
 
     sandbox.stop_daemon().await;
 }
+
+#[tokio::test]
+async fn agent_instructions_prefers_registered_label_over_branch() {
+    // `adj add --label` can register a key that differs from the branch. agent-instructions must
+    // steer at the registered key, not re-derive the (different) branch label — otherwise every
+    // command and URL in the doc points at an unregistered instance.
+    let mut sandbox = Sandbox::new().await;
+    sandbox.start_daemon().await;
+
+    let repo = TempDir::new().expect("repo dir");
+    git(repo.path(), &["init", "-q"]).await;
+    write_echo_server(repo.path()).await;
+    write_app(repo.path(), "site").await;
+    git(repo.path(), &["add", "-A"]).await;
+    git(repo.path(), &["commit", "-q", "-m", "app skeleton"]).await;
+
+    // Linked worktree on branch `feature-x` — the branch label would derive to `feature-x`.
+    let wt_parent = TempDir::new().expect("wt parent");
+    let wt = wt_parent.path().join("wt");
+    git(
+        repo.path(),
+        &["worktree", "add", "-b", "feature-x", wt.to_str().unwrap()],
+    )
+    .await;
+
+    // Register the worktree under an explicit label that does NOT match the branch.
+    let add = sandbox
+        .cmd()
+        .arg("add")
+        .arg("--label")
+        .arg("prod")
+        .arg(&wt)
+        .output()
+        .await
+        .expect("add");
+    assert!(add.status.success(), "add: {add:?}");
+    assert!(
+        String::from_utf8_lossy(&add.stdout).contains("prod.site"),
+        "add registered the explicit label: {add:?}"
+    );
+
+    let out = sandbox
+        .cmd()
+        .arg("agent-instructions")
+        .arg("--path")
+        .arg(&wt)
+        .output()
+        .await
+        .expect("agent-instructions");
+    assert!(out.status.success(), "agent-instructions: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains("adj status prod.site") && stdout.contains("prod.site.adj.ac"),
+        "doc must use the registered key `prod.site`: {stdout}"
+    );
+    assert!(
+        !stdout.contains("feature-x.site"),
+        "doc must not re-derive the branch label `feature-x.site`: {stdout}"
+    );
+
+    let _ = sandbox.cmd().arg("down").arg("prod.site").output().await;
+    sandbox.stop_daemon().await;
+}
