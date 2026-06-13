@@ -18,12 +18,15 @@ pub fn detect_label(dir: &Path) -> Result<Option<String>> {
     //   gitdir: <common>/.git/worktrees/<id>
     // A submodule has the shape:
     //   gitdir: <root>/.git/modules/<name>
-    // Anything not containing `/worktrees/` is not a linked worktree.
+    // Anchor on the git-internal `/.git/worktrees/` segment, not a bare `/worktrees/` substring:
+    // a submodule whose repo simply lives under a directory named `worktrees`
+    // (`…/worktrees/super/.git/modules/sub`) contains `/worktrees/` but not `/.git/worktrees/`,
+    // and must not be mistaken for a linked worktree.
     let gitfile = std::fs::read_to_string(dir.join(".git"))
         .context("reading .git file")?;
     let first_line = gitfile.lines().next().unwrap_or("").trim();
     let pointer = first_line.strip_prefix("gitdir:").map(str::trim).unwrap_or("");
-    if !pointer.contains("/worktrees/") {
+    if !pointer.contains("/.git/worktrees/") {
         return Ok(None);
     }
 
@@ -114,5 +117,22 @@ mod tests {
 
         let result = detect_label(dir.path()).expect("no error for submodule");
         assert!(result.is_none(), "submodule should return Ok(None), got {result:?}");
+    }
+
+    #[test]
+    fn submodule_under_worktrees_named_dir_returns_none() {
+        // A submodule whose superproject simply lives under a directory named `worktrees`. The
+        // pointer contains `/worktrees/` but goes through `/.git/modules/`, so anchoring on the
+        // bare substring would misclassify it as a linked worktree and derive a branch label.
+        let dir = TempDir::new().expect("tempdir");
+        let mut f = std::fs::File::create(dir.path().join(".git")).expect("create .git");
+        writeln!(f, "gitdir: /home/me/worktrees/super/.git/modules/sub").expect("write");
+        drop(f);
+
+        let result = detect_label(dir.path()).expect("no error for submodule");
+        assert!(
+            result.is_none(),
+            "submodule under a `worktrees`-named dir should return Ok(None), got {result:?}"
+        );
     }
 }
