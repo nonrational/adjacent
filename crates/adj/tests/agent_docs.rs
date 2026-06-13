@@ -208,3 +208,55 @@ async fn worktree_uses_instance_key_not_bare_name() {
         "stdout must not contain bare site URL: {stdout}"
     );
 }
+
+#[tokio::test]
+async fn detached_head_worktree_falls_back_to_bare_name() {
+    // A linked worktree on a detached HEAD has no branch to derive a label from. agent-instructions
+    // is a best-effort read-and-print: it must still emit a usable doc (templated with the bare
+    // name) rather than exiting non-zero and writing nothing — even though `adj add` would require
+    // an explicit `--label` here.
+    let home = TempDir::new().expect("home");
+    let repo = TempDir::new().expect("repo dir");
+    git(repo.path(), &["init", "-q"]).await;
+    let manifest = "name = \"site\"\ncmd = \"npm run dev\"\n";
+    tokio::fs::write(repo.path().join("adjacent.toml"), manifest)
+        .await
+        .expect("write manifest");
+    git(repo.path(), &["add", "-A"]).await;
+    git(repo.path(), &["commit", "-q", "-m", "app skeleton"]).await;
+
+    let wt_parent = TempDir::new().expect("wt parent");
+    let wt = wt_parent.path().join("wt");
+    git(
+        repo.path(),
+        &["worktree", "add", "--detach", wt.to_str().unwrap()],
+    )
+    .await;
+
+    let out = Command::new(adj_bin())
+        .env("ADJACENT_HOME", home.path())
+        .arg("agent-instructions")
+        .arg("--path")
+        .arg(&wt)
+        .output()
+        .await
+        .expect("agent-instructions");
+
+    assert!(
+        out.status.success(),
+        "agent-instructions must not fail on detached HEAD: status={:?} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("adj status site") && stdout.contains("http://site.adj.ac/"),
+        "doc should template the bare name on detached HEAD: {stdout}"
+    );
+    // The reason for the fallback is surfaced on stderr, not baked into the doc.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--label"),
+        "stderr should explain the fallback: {stderr}"
+    );
+}

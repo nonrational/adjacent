@@ -23,7 +23,7 @@ pub fn emit(path: Option<String>) -> Result<()> {
     // fall back to deriving the worktree label the same way `client::add` would.
     let key = match registered_key(&dir, &cfg.name) {
         Some(k) => k,
-        None => derive_key(&dir, &cfg.name)?,
+        None => derive_key(&dir, &cfg.name),
     };
     print!("{}", render(&key, &cfg.cmd));
     Ok(())
@@ -44,13 +44,21 @@ fn registered_key(dir: &Path, name: &str) -> Option<String> {
 }
 
 /// Derive the key `client::add` would assign when the dir is not yet registered: a linked
-/// worktree's branch label, else the bare name. Propagates `detect_label` errors (detached HEAD,
-/// git failure) so the bootstrap case surfaces the same guidance `adj add` would.
-fn derive_key(dir: &Path, name: &str) -> Result<String> {
-    Ok(match worktree::detect_label(dir)? {
-        Some(label) => format!("{label}.{name}"),
-        None => name.to_string(),
-    })
+/// worktree's branch label, else the bare name.
+///
+/// Best-effort: a steering doc must still print when label detection fails (detached HEAD, `git`
+/// not on PATH), so detection errors degrade to the bare name with a stderr note rather than
+/// aborting the command — the agent gets a usable doc and the human can `adj add --label` if the
+/// instance needs its own URL. (`adj add` itself still errors on the same conditions.)
+fn derive_key(dir: &Path, name: &str) -> String {
+    match worktree::detect_label(dir) {
+        Ok(Some(label)) => format!("{label}.{name}"),
+        Ok(None) => name.to_string(),
+        Err(err) => {
+            eprintln!("adj: {err:#}; templating the doc with the bare name `{name}`");
+            name.to_string()
+        }
+    }
 }
 
 fn render(name: &str, cmd: &str) -> String {
