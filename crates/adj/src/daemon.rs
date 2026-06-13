@@ -13,6 +13,7 @@ use crate::proxy;
 use crate::readiness::{wait_ready as readiness_wait, ReadinessError};
 use crate::registry::{self, Registry};
 use crate::supervisor::Supervisor;
+use crate::tls;
 
 /// How often the idle scanner looks at the supervised apps to decide whether any should be
 /// stopped. The poll cost is tiny (one mutex lock per pass) so a short interval keeps the
@@ -64,15 +65,24 @@ pub async fn run() -> Result<()> {
         }
     });
 
-    // HTTPS listener is best-effort: the user might not have run `adj install-ca` yet, the CA
-    // files might be unreadable, or the high port might be taken. Any of those degrade the
-    // daemon to HTTP-only rather than killing it — same posture as the HTTP proxy task above.
-    let https_supervisor = supervisor.clone();
-    tokio::spawn(async move {
-        if let Err(err) = proxy::run_https(https_supervisor).await {
-            tracing::error!("https listener exited: {err}");
+    // HTTPS listener and SAN re-issue share one resolver. Construction fails when the CA is
+    // missing — that's "HTTPS not opted in": skip the listener, and registry changes skip the
+    // leaf re-issue. Same degraded-not-fatal posture as before.
+    let resolver = match tls::LeafResolver::new() {
+        Ok(r) => Some(r),
+        Err(err) => {
+            tracing::error!("https listener disabled: {err}");
+            None
         }
-    });
+    };
+    if let Some(resolver) = resolver.clone() {
+        let https_supervisor = supervisor.clone();
+        tokio::spawn(async move {
+            if let Err(err) = proxy::run_https(https_supervisor, resolver).await {
+                tracing::error!("https listener exited: {err}");
+            }
+        });
+    }
 
     // Idle scanner: periodically stop apps whose last-routed-request is older than their
     // configured idle_timeout. Chose a scan loop over per-app timers — no per-app timer state
@@ -92,8 +102,9 @@ pub async fn run() -> Result<()> {
         };
         let sup = supervisor.clone();
         let reg_lock = registry_lock.clone();
+        let resolver = resolver.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle_client(stream, sup, reg_lock).await {
+            if let Err(err) = handle_client(stream, sup, reg_lock, resolver).await {
                 tracing::warn!("client handler error: {err}");
             }
         });
@@ -122,6 +133,7 @@ async fn handle_client(
     stream: UnixStream,
     supervisor: Arc<Supervisor>,
     registry_lock: Arc<Mutex<()>>,
+    resolver: Option<Arc<tls::LeafResolver>>,
 ) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -141,7 +153,7 @@ async fn handle_client(
         }
     };
 
-    let response = match dispatch(req, supervisor, registry_lock).await {
+    let response = match dispatch(req, supervisor, registry_lock, resolver).await {
         Ok(r) => r,
         Err(err) => Response::Error {
             message: format!("{err}"),
@@ -166,10 +178,11 @@ async fn dispatch(
     req: Request,
     supervisor: Arc<Supervisor>,
     registry_lock: Arc<Mutex<()>>,
+    resolver: Option<Arc<tls::LeafResolver>>,
 ) -> Result<Response> {
     match req {
         Request::Ping => Ok(Response::Ok),
-        Request::Add { path, label } => add(path, label, registry_lock).await,
+        Request::Add { path, label } => add(path, label, registry_lock, resolver).await,
         Request::List => list(supervisor).await,
         Request::Up { name } => up(name, supervisor).await,
         Request::Down { name } => down(name, supervisor).await,
@@ -177,8 +190,8 @@ async fn dispatch(
         Request::Status { name } => status(name, supervisor).await,
         Request::LogPath { name } => log_path(name).await,
         Request::WaitReady { name, timeout_secs } => wait_ready(name, timeout_secs, supervisor).await,
-        Request::Remove { name } => remove(name, supervisor, registry_lock).await,
-        Request::Prune => prune(supervisor, registry_lock).await,
+        Request::Remove { name } => remove(name, supervisor, registry_lock, resolver).await,
+        Request::Prune => prune(supervisor, registry_lock, resolver).await,
     }
 }
 
@@ -268,6 +281,7 @@ async fn add(
     path: String,
     label: Option<String>,
     registry_lock: Arc<Mutex<()>>,
+    resolver: Option<Arc<tls::LeafResolver>>,
 ) -> Result<Response> {
     // The client canonicalizes against the user's CWD before sending. We require absolute
     // paths here so we never silently resolve against the daemon's CWD.
@@ -319,6 +333,13 @@ async fn add(
         },
     );
     reg.save()?;
+    // Best-effort: a failed re-issue means HTTPS serves the previous SAN set until the next
+    // registry change; the registry mutation itself already succeeded.
+    if let Some(resolver) = &resolver {
+        if let Err(err) = resolver.reload() {
+            tracing::warn!("leaf cert re-issue after registry change failed: {err}");
+        }
+    }
     Ok(Response::Added {
         name: key,
         path: canon.display().to_string(),
@@ -436,6 +457,7 @@ async fn remove(
     name: String,
     supervisor: Arc<Supervisor>,
     registry_lock: Arc<Mutex<()>>,
+    resolver: Option<Arc<tls::LeafResolver>>,
 ) -> Result<Response> {
     let _guard = registry_lock.lock().await;
     let mut reg = Registry::load()?;
@@ -462,10 +484,21 @@ async fn remove(
     supervisor.forget(&name).await;
     reg.remove(&name);
     reg.save()?;
+    // Best-effort: a failed re-issue means HTTPS serves the previous SAN set until the next
+    // registry change; the registry mutation itself already succeeded.
+    if let Some(resolver) = &resolver {
+        if let Err(err) = resolver.reload() {
+            tracing::warn!("leaf cert re-issue after registry change failed: {err}");
+        }
+    }
     Ok(Response::Removed { name })
 }
 
-async fn prune(supervisor: Arc<Supervisor>, registry_lock: Arc<Mutex<()>>) -> Result<Response> {
+async fn prune(
+    supervisor: Arc<Supervisor>,
+    registry_lock: Arc<Mutex<()>>,
+    resolver: Option<Arc<tls::LeafResolver>>,
+) -> Result<Response> {
     let _guard = registry_lock.lock().await;
     let mut reg = Registry::load()?;
     let stale: Vec<String> = reg
@@ -493,6 +526,13 @@ async fn prune(supervisor: Arc<Supervisor>, registry_lock: Arc<Mutex<()>>) -> Re
     }
     if !stale.is_empty() {
         reg.save()?;
+        // Best-effort: a failed re-issue means HTTPS serves the previous SAN set until the next
+        // registry change; the registry mutation itself already succeeded.
+        if let Some(resolver) = &resolver {
+            if let Err(err) = resolver.reload() {
+                tracing::warn!("leaf cert re-issue after registry change failed: {err}");
+            }
+        }
     }
     Ok(Response::Pruned { removed: stale })
 }

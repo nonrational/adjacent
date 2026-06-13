@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
@@ -10,9 +10,12 @@ use rcgen::{
     KeyUsagePurpose, NameConstraints, SanType,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::{ClientHello, ResolvesServerCert};
+use rustls::sign::CertifiedKey;
 use rustls::ServerConfig;
 
 use crate::paths;
+use crate::registry::{self, Registry};
 
 mod keychain;
 
@@ -34,6 +37,22 @@ pub fn delete_ca() -> Result<()> {
 /// included alongside it — Adjacent's landing page already lives at the apex.
 const WILDCARD_HOST: &str = "*.adj.ac";
 const APEX_HOST: &str = "adj.ac";
+
+/// The leaf SAN set for a registry snapshot: the v1 apex + single-label wildcard, plus a
+/// `*.<base>.adj.ac` wildcard per distinct base name so worktree instances
+/// (`<label>.<base>.adj.ac`) validate. A wildcard matches exactly one label, so the per-base
+/// entries can't be folded into `*.adj.ac`. Deterministic order (apex, wildcard, sorted bases)
+/// makes set comparison against an issued cert a plain Vec equality.
+pub fn registry_sans(reg: &Registry) -> Vec<String> {
+    let mut sans = vec![APEX_HOST.to_string(), WILDCARD_HOST.to_string()];
+    let mut bases: Vec<&str> = reg.apps.keys().map(|k| registry::base_name(k)).collect();
+    bases.sort_unstable();
+    bases.dedup();
+    for base in bases {
+        sans.push(format!("*.{base}.adj.ac"));
+    }
+    sans
+}
 
 /// The CA's nameConstraints `permitted_subtrees` is scoped to this DNS suffix. Per RFC 5280
 /// § 4.2.1.10 a DNS-name subtree matches the bare name and any name ending in `.<suffix>`, so
@@ -106,30 +125,77 @@ pub fn ca_exists() -> Result<bool> {
     Ok(keychain::load()?.is_some())
 }
 
-/// Build a `rustls::ServerConfig` from disk, generating the leaf cert on demand. Caller is
-/// expected to surface errors (HTTPS listener startup is best-effort: no CA → log and skip).
-pub fn server_config() -> Result<Arc<ServerConfig>> {
-    if !ca_exists()? {
-        return Err(anyhow!(
-            "local CA not found — run `adj install-ca` to generate one"
-        ));
+/// Serves the daemon's leaf cert and re-issues it when the registry's SAN set changes, so a
+/// newly added worktree instance gets a valid cert without an HTTPS-listener restart.
+#[derive(Debug)]
+pub struct LeafResolver {
+    current: RwLock<Arc<CertifiedKey>>,
+    /// SANs baked into `current`; compared on reload so an unchanged registry skips the
+    /// keychain signature entirely.
+    sans: RwLock<Vec<String>>,
+}
+
+impl LeafResolver {
+    /// Build the resolver from the on-disk CA, issuing a leaf that covers the current
+    /// registry. Errors when the CA is missing — callers treat that as "HTTPS not opted in".
+    pub fn new() -> Result<Arc<Self>> {
+        if !ca_exists()? {
+            return Err(anyhow!(
+                "local CA not found — run `adj install-ca` to generate one"
+            ));
+        }
+        let sans = registry_sans(&Registry::load()?);
+        let key = certified_key_for(&sans)?;
+        Ok(Arc::new(Self {
+            current: RwLock::new(Arc::new(key)),
+            sans: RwLock::new(sans),
+        }))
     }
-    let (leaf_cert_pem, leaf_key_pem) = ensure_leaf()?;
-    let chain = parse_cert_chain(&leaf_cert_pem).context("parsing leaf certificate chain")?;
-    let key = parse_private_key(&leaf_key_pem).context("parsing leaf private key")?;
-    // rustls 0.23 with the default `aws_lc_rs` feature auto-installs the process default crypto
-    // provider on first builder() call, so no explicit install_default() is needed here.
+
+    /// Recompute the SAN set from the registry; re-issue and swap the served cert if changed.
+    pub fn reload(&self) -> Result<()> {
+        let sans = registry_sans(&Registry::load()?);
+        if *self.sans.read().expect("sans lock") == sans {
+            return Ok(());
+        }
+        let key = certified_key_for(&sans)?;
+        *self.current.write().expect("cert lock") = Arc::new(key);
+        *self.sans.write().expect("sans lock") = sans;
+        Ok(())
+    }
+}
+
+impl ResolvesServerCert for LeafResolver {
+    fn resolve(&self, _hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        Some(self.current.read().expect("cert lock").clone())
+    }
+}
+
+fn certified_key_for(sans: &[String]) -> Result<CertifiedKey> {
+    let (cert_pem, key_pem) = ensure_leaf(sans)?;
+    let chain = parse_cert_chain(&cert_pem).context("parsing leaf certificate chain")?;
+    let key_der = parse_private_key(&key_pem).context("parsing leaf private key")?;
+    // rustls 0.23 with the default `aws_lc_rs` feature auto-installs the process default
+    // crypto provider, matching the previous with_single_cert behavior.
+    let signing_key = rustls::crypto::aws_lc_rs::sign::any_supported_type(&key_der)
+        .context("building leaf signing key")?;
+    Ok(CertifiedKey::new(chain, signing_key))
+}
+
+/// Build a `rustls::ServerConfig` around the hot-swapping resolver. Caller is expected to
+/// surface errors (HTTPS listener startup is best-effort: no CA → log and skip).
+pub fn server_config(resolver: Arc<LeafResolver>) -> Result<Arc<ServerConfig>> {
     let config = ServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(chain, key)
-        .context("building rustls ServerConfig")?;
+        .with_cert_resolver(resolver);
     Ok(Arc::new(config))
 }
 
-/// Read the leaf cert + key from disk, regenerating them if missing. We don't try to detect
-/// CA mismatches at boot — `generate_ca` deletes the stale leaf, so a missing-leaf branch
-/// covers both fresh-install and post-rotation paths with one mechanism.
-fn ensure_leaf() -> Result<(String, String)> {
+/// Read the leaf cert + key from disk, re-issuing when missing OR when the on-disk SAN set no
+/// longer matches the desired one (an app was added/removed since issuance, or the leaf
+/// predates worktree instances). `generate_ca` still deletes the leaf on CA rotation, so this
+/// single mechanism covers fresh-install, post-rotation, and SAN-drift paths.
+fn ensure_leaf(sans: &[String]) -> Result<(String, String)> {
     let cert_path = leaf_cert_path()?;
     let key_path = leaf_key_path()?;
     if cert_path.exists() && key_path.exists() {
@@ -137,12 +203,41 @@ fn ensure_leaf() -> Result<(String, String)> {
             .with_context(|| format!("reading {}", cert_path.display()))?;
         let key = fs::read_to_string(&key_path)
             .with_context(|| format!("reading {}", key_path.display()))?;
-        return Ok((cert, key));
+        if leaf_covers(&cert, sans)? {
+            return Ok((cert, key));
+        }
     }
-    issue_leaf()
+    issue_leaf(sans)
 }
 
-fn issue_leaf() -> Result<(String, String)> {
+/// True when the leaf's DNS SANs equal the desired set exactly (order-insensitive).
+fn leaf_covers(cert_pem: &str, sans: &[String]) -> Result<bool> {
+    let (_, parsed) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes())
+        .map_err(|e| anyhow!("parsing leaf PEM: {e}"))?;
+    let cert = parsed
+        .parse_x509()
+        .map_err(|e| anyhow!("parsing leaf X.509: {e}"))?;
+    let mut have: Vec<String> = cert
+        .subject_alternative_name()
+        .map_err(|e| anyhow!("reading leaf SANs: {e}"))?
+        .map(|ext| {
+            ext.value
+                .general_names
+                .iter()
+                .filter_map(|gn| match gn {
+                    x509_parser::extensions::GeneralName::DNSName(n) => Some(n.to_string()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    have.sort_unstable();
+    let mut want: Vec<String> = sans.to_vec();
+    want.sort_unstable();
+    Ok(have == want)
+}
+
+fn issue_leaf(sans: &[String]) -> Result<(String, String)> {
     let ca_cert_pem = fs::read_to_string(ca_cert_path()?).context("reading CA cert")?;
     let ca_handle = keychain::load()
         .context("loading Keychain CA key")?
@@ -157,16 +252,17 @@ fn issue_leaf() -> Result<(String, String)> {
         .self_signed(&ca_key)
         .context("rebuilding CA from disk")?;
 
-    let mut leaf_params = CertificateParams::new(vec![
-        WILDCARD_HOST.to_string(),
-        APEX_HOST.to_string(),
-    ])
-    .context("building leaf cert params")?;
+    let mut leaf_params =
+        CertificateParams::new(sans.to_vec()).context("building leaf cert params")?;
     leaf_params.distinguished_name = leaf_dn();
-    leaf_params.subject_alt_names = vec![
-        SanType::DnsName(WILDCARD_HOST.try_into().context("wildcard SAN")?),
-        SanType::DnsName(APEX_HOST.try_into().context("apex SAN")?),
-    ];
+    leaf_params.subject_alt_names = sans
+        .iter()
+        .map(|s| {
+            Ok(SanType::DnsName(
+                s.as_str().try_into().with_context(|| format!("SAN `{s}`"))?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let leaf_key = KeyPair::generate().context("generating leaf key pair")?;
     let leaf_cert = leaf_params
         .signed_by(&leaf_key, &ca_signed, &ca_key)
@@ -331,7 +427,7 @@ mod tests {
     #[test]
     fn server_config_errors_without_ca() {
         with_temp_home(|| {
-            let err = server_config().unwrap_err();
+            let err = LeafResolver::new().unwrap_err();
             assert!(format!("{err}").contains("install-ca"));
         });
     }
@@ -341,9 +437,43 @@ mod tests {
     fn server_config_succeeds_after_generate() {
         with_temp_home(|| {
             generate_ca().expect("generate_ca");
-            let _cfg = server_config().expect("server_config");
+            let resolver = LeafResolver::new().expect("resolver");
+            let _cfg = server_config(resolver).expect("server_config");
             assert!(leaf_cert_path().unwrap().exists());
             assert!(leaf_key_path().unwrap().exists());
+        });
+    }
+
+    #[test]
+    fn registry_sans_adds_wildcard_per_base() {
+        use crate::registry::AppEntry;
+        let mut reg = Registry::default();
+        reg.insert("site".into(), AppEntry { path: "/tmp/a".into() });
+        reg.insert("feature-x.site".into(), AppEntry { path: "/tmp/b".into() });
+        reg.insert("api".into(), AppEntry { path: "/tmp/c".into() });
+        let expected: Vec<String> = ["adj.ac", "*.adj.ac", "*.api.adj.ac", "*.site.adj.ac"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(registry_sans(&reg), expected);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn leaf_reissues_when_san_set_changes() {
+        with_temp_home(|| {
+            generate_ca().expect("generate_ca");
+            let base: Vec<String> = vec!["adj.ac".into(), "*.adj.ac".into()];
+            let (pem1, _) = ensure_leaf(&base).expect("first issue");
+            // Same set → the cached leaf comes back byte-identical (no needless keychain work).
+            let (pem1b, _) = ensure_leaf(&base).expect("cached");
+            assert_eq!(pem1, pem1b);
+            let widened: Vec<String> =
+                vec!["adj.ac".into(), "*.adj.ac".into(), "*.site.adj.ac".into()];
+            let (pem2, _) = ensure_leaf(&widened).expect("re-issue");
+            assert_ne!(pem1, pem2, "SAN change must re-issue the leaf");
+            assert!(leaf_covers(&pem2, &widened).expect("parse"));
+            assert!(!leaf_covers(&pem2, &base).expect("parse"));
         });
     }
 
@@ -362,7 +492,7 @@ mod tests {
             // Force a measurable gap so any accidental rebuild path would land on a different
             // `now.as_secs()` OU and the assertion would fail.
             std::thread::sleep(Duration::from_millis(1100));
-            let _cfg = server_config().expect("server_config");
+            let _resolver = LeafResolver::new().expect("resolver");
             let ca_pem = std::fs::read_to_string(ca_cert_path().unwrap()).unwrap();
             let leaf_pem = std::fs::read_to_string(leaf_cert_path().unwrap()).unwrap();
             let (_, ca_block) =

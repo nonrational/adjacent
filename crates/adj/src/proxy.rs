@@ -99,9 +99,12 @@ pub async fn run(supervisor: Arc<Supervisor>) -> Result<()> {
 /// HTTPS listener: terminates TLS with the locally-issued wildcard cert, then dispatches into
 /// the same per-request handler the HTTP path uses. Startup is best-effort — if the local CA
 /// hasn't been generated yet the daemon logs and keeps serving HTTP only (AC #5 in issue #6).
-pub async fn run_https(supervisor: Arc<Supervisor>) -> Result<()> {
-    let server_config = tls::server_config()
-        .map_err(|e| anyhow!("loading TLS config: {e}"))?;
+pub async fn run_https(
+    supervisor: Arc<Supervisor>,
+    resolver: Arc<tls::LeafResolver>,
+) -> Result<()> {
+    let server_config =
+        tls::server_config(resolver).map_err(|e| anyhow!("loading TLS config: {e}"))?;
     let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
 
     let port = https_port();
