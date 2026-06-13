@@ -14,11 +14,9 @@ Homepage: [adj.ac/ent](https://adj.ac/ent)
 
 - **A URL per worktree.** Several agents in parallel git worktrees of one repo can all register. `adj add` names each instance after its branch — `feature-x.site.adj.ac` — each with its own process, port and logs. See [Worktrees](#worktrees).
 
-- **Lazy boot.** Apps don't run until a request hits `<name>.adj.ac`. Concurrent requests during boot wait on the same start.
+- **Boots on demand, stops when idle.** Apps don't run until a request hits `<name>.adj.ac`, and concurrent requests during boot wait on the same start. They stop after `idle_timeout` (default `"15m"`, accepts `"30s"` / `"1h"` / `"off"`) with no proxied traffic, so long sessions don't accumulate orphaned servers.
 
 - **Readiness before forwarding.** Default is TCP-connect; opt into HTTP probing with `health_check_url = "/healthz"`. The proxy never forwards to a half-booted process. Agents can block on this explicitly with `adj wait-ready`.
-
-- **Idle shutdown by default.** Apps stop after `idle_timeout` (default `"15m"`, accepts `"30s"` / `"1h"` / `"off"`) with no proxied traffic. Long sessions don't accumulate orphaned servers.
 
 - **The daemon owns ports.** `$PORT` is injected into the boot command; the app binds where it's told. Apps that need a different variable name set `port_env = "BIND_PORT"`.
 
