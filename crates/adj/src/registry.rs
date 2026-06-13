@@ -109,6 +109,9 @@ pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// Parse the `idle_timeout` TOML field. Accepts `"15m"`, `"30s"`, `"1h"`, `"500ms"`, or
 /// `"off"` (case-insensitive) to disable idle shutdown. Returns `Ok(None)` for `"off"`.
+/// Zero durations are rejected: a zero window would make the app a permanent shutdown
+/// candidate (stopped on every scan tick), and users writing `"0s"` almost always mean
+/// "disable" — which is what `"off"` does.
 pub fn parse_idle_timeout(raw: &str) -> Result<Option<Duration>> {
     let s = raw.trim();
     if s.eq_ignore_ascii_case("off") || s.eq_ignore_ascii_case("disabled") {
@@ -133,6 +136,11 @@ pub fn parse_idle_timeout(raw: &str) -> Result<Option<Duration>> {
         "h" => Duration::from_secs(n * 60 * 60),
         other => return Err(anyhow!("unknown duration unit `{}`", other)),
     };
+    if dur.is_zero() {
+        return Err(anyhow!(
+            "idle_timeout of zero would stop the app on every idle scan; use `off` to disable idle shutdown"
+        ));
+    }
     Ok(Some(dur))
 }
 
@@ -162,6 +170,19 @@ mod tests {
         assert_eq!(parse_idle_timeout("off").unwrap(), None);
         assert_eq!(parse_idle_timeout("OFF").unwrap(), None);
         assert_eq!(parse_idle_timeout("disabled").unwrap(), None);
+    }
+
+    #[test]
+    fn rejects_zero_and_points_at_off() {
+        for raw in ["0s", "0ms", "0m", "0h"] {
+            let err = parse_idle_timeout(raw).unwrap_err();
+            assert!(
+                err.to_string().contains("use `off`"),
+                "error for {:?} should suggest `off`, got: {}",
+                raw,
+                err
+            );
+        }
     }
 
     #[test]
