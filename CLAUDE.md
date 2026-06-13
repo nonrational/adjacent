@@ -57,7 +57,9 @@ Polls supervisor state and either TCP-connects (default) or HTTP-GETs `health_ch
 
 ### Registry & config
 
-`~/.adjacent/registry.toml` maps `name → path`. Per-app config at `<path>/adjacent.toml`:
+`~/.adjacent/registry.toml` maps `name → path`. Registry keys may carry one structural dot: `<label>.<name>` is a worktree instance (`feature-x.site` routes at `feature-x.site.adj.ac`). `adj add` inside a linked git worktree derives the label from the branch name (`--label` overrides); `adj remove <name>` deletes one entry, `adj prune` deletes every entry whose path is gone, and `adj list` flags those as stale. App names in `adjacent.toml` therefore cannot contain dots. The TLS leaf carries a `*.<name>.adj.ac` SAN per registered base name and re-issues on registry changes.
+
+Per-app config at `<path>/adjacent.toml`:
 
 ```toml
 name = "site"

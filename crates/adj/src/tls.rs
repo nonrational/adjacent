@@ -217,14 +217,15 @@ fn ensure_leaf(sans: &[String]) -> Result<(String, String)> {
     let cert_path = leaf_cert_path()?;
     let key_path = leaf_key_path()?;
     if cert_path.exists() && key_path.exists() {
-        let cert = fs::read_to_string(&cert_path)
-            .with_context(|| format!("reading {}", cert_path.display()))?;
-        let key = fs::read_to_string(&key_path)
-            .with_context(|| format!("reading {}", key_path.display()))?;
-        // A corrupt cached leaf should heal via re-issue, not wedge HTTPS forever on a parse error.
-        match leaf_covers(&cert, sans) {
-            Ok(true) => return Ok((cert, key)),
-            Ok(false) | Err(_) => {}
+        // A corrupt cached leaf should heal via re-issue, not wedge HTTPS forever. Read errors
+        // (non-UTF-8 bytes, permissions) fall through to issue_leaf just like parse errors —
+        // only a readable, parseable cert that already covers the desired SANs short-circuits.
+        match (fs::read_to_string(&cert_path), fs::read_to_string(&key_path)) {
+            (Ok(cert), Ok(key)) => match leaf_covers(&cert, sans) {
+                Ok(true) => return Ok((cert, key)),
+                Ok(false) | Err(_) => {}
+            },
+            _ => {}
         }
     }
     issue_leaf(sans)

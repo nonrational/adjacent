@@ -46,6 +46,8 @@ Commands:
   up                    Boot a registered app
   down                  Stop a running app (SIGTERM, then SIGKILL after a grace period)
   restart               Restart an app (down then up)
+  remove                Remove an app from the registry (stopping it first if running)
+  prune                 Remove every registry entry whose directory no longer exists on disk
   status                Report the current state of an app
   logs                  Print the log file for an app
   wait-ready            Block until an app reports ready (TCP-open or 2xx from health_check_url)
@@ -59,6 +61,15 @@ Options:
   -h, --help     Print help
   -V, --version  Print version
 ```
+
+## Worktrees
+
+Four agents in four git worktrees of the same repo can all register. `adj add` inside a
+linked worktree names the instance after its branch: the worktree of `site` on branch
+`feature-x` serves at `feature-x.site.adj.ac`, while the main checkout keeps `site.adj.ac`.
+No flags needed (`--label` overrides the branch name); each worktree gets its own process,
+port and logs. When a worktree is deleted, `adj list` flags the leftover entry as stale and
+`adj prune` clears them all.
 
 ## Agent Integration
 

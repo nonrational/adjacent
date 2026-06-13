@@ -4,7 +4,7 @@ Every read command on `adj` accepts `--json` and emits a stable, machine-parseab
 This document is the contract — fields documented here will not change without a deprecation
 notice, and the test suite asserts the shapes below.
 
-Write commands (`add`, `up`, `down`, `restart`) do not accept `--json` in v1.
+Write commands (`add`, `up`, `down`, `restart`, `remove`, `prune`) do not accept `--json` in v1.
 
 ## States
 
@@ -21,18 +21,20 @@ meaningful for the current state.
 
 ```json
 [
-  { "name": "site",    "path": "/Users/me/code/site",  "state": "running", "port": 53412 },
-  { "name": "backend", "path": "/Users/me/code/api",   "state": "stopped" },
-  { "name": "worker",  "path": "/Users/me/code/work",  "state": "crashed" }
+  { "name": "site",           "path": "/Users/me/code/site",    "state": "running", "port": 53412 },
+  { "name": "feature-x.site", "path": "/Users/me/code/deleted", "state": "stopped", "stale": true },
+  { "name": "backend",        "path": "/Users/me/code/api",     "state": "stopped" },
+  { "name": "worker",         "path": "/Users/me/code/work",    "state": "crashed" }
 ]
 ```
 
-| Field   | Type   | When                                 |
-|---------|--------|--------------------------------------|
-| `name`  | string | always                               |
-| `path`  | string | always (absolute, canonical)         |
-| `state` | string | always; one of `stopped` / `running` / `crashed` |
-| `port`  | number | present iff `state == "running"`     |
+| Field   | Type    | When                                 |
+|---------|---------|--------------------------------------|
+| `name`  | string  | always                               |
+| `path`  | string  | always (absolute, canonical)         |
+| `state` | string  | always; one of `stopped` / `running` / `crashed` |
+| `port`  | number  | present iff `state == "running"`     |
+| `stale` | boolean | present iff the registered path no longer exists on disk |
 
 An empty registry returns `[]`.
 
