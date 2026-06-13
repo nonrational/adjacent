@@ -149,6 +149,7 @@ pub fn idle_timeout_for(cfg: &AppConfig) -> Option<Duration> {
             tracing::warn!(
                 idle_timeout = s,
                 error = %err,
+                default = ?DEFAULT_IDLE_TIMEOUT,
                 "invalid idle_timeout; falling back to default"
             );
             Some(DEFAULT_IDLE_TIMEOUT)
@@ -231,8 +232,8 @@ mod tests {
         assert_eq!(resolved, Some(DEFAULT_IDLE_TIMEOUT));
         let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
         assert!(
-            logs.contains("invalid idle_timeout") && logs.contains("10x"),
-            "expected a warn naming the bad value, got: {logs}"
+            logs.contains("invalid idle_timeout") && logs.contains("10x") && logs.contains("900s"),
+            "expected a warn naming the bad value and the default it fell back to, got: {logs}"
         );
     }
 
