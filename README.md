@@ -12,6 +12,8 @@ Homepage: [adj.ac/ent](https://adj.ac/ent)
 
 - **Config lives in code.** `adjacent.toml` sits in the app directory and registers via `adj add <path>`. The boot command and idle timeout are part of the repo, not buried in a global registry. Agents make config maintenance cheap.
 
+- **A URL per worktree.** Several agents in parallel git worktrees of one repo can all register. `adj add` names each instance after its branch — `feature-x.site.adj.ac` — each with its own process, port and logs. See [Worktrees](#worktrees).
+
 - **Lazy boot.** Apps don't run until a request hits `<name>.adj.ac`. Concurrent requests during boot wait on the same start.
 
 - **Readiness before forwarding.** Default is TCP-connect; opt into HTTP probing with `health_check_url = "/healthz"`. The proxy never forwards to a half-booted process. Agents can block on this explicitly with `adj wait-ready`.
