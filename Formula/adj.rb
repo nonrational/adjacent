@@ -7,7 +7,7 @@ class Adj < Formula
   on_macos do
     on_arm do
       url "https://github.com/nonrational/adjacent/releases/download/v0.1.0-alpha.1/adj-0.1.0-alpha.1-aarch64-apple-darwin.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+      sha256 "867ad2afac3b6d988872b5620b521dc0f4d6f373db9bf3fa10415e248eaf15d6"
     end
     on_intel do
       odie "adj alpha ships Apple Silicon (arm64) binaries only for now"
