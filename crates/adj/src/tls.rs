@@ -20,6 +20,8 @@ use crate::registry::{self, Registry};
 mod keychain;
 
 pub(crate) use keychain::delete as delete_keychain_ca;
+// Only the macOS doctor checks load a keychain handle; on other targets the re-export is unused.
+#[cfg(target_os = "macos")]
 pub(crate) use keychain::load as load_keychain_ca;
 
 /// Tear down the local CA: remove the Keychain-resident key and any cached on-disk files.
@@ -175,7 +177,7 @@ impl LeafResolver {
     }
 
     /// DER of the leaf currently served to clients, for tests pinning hot-swap behavior.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     fn current_cert_der(&self) -> Vec<u8> {
         self.state.read().expect("leaf state lock").key.cert[0]
             .as_ref()
@@ -220,12 +222,13 @@ fn ensure_leaf(sans: &[String]) -> Result<(String, String)> {
         // A corrupt cached leaf should heal via re-issue, not wedge HTTPS forever. Read errors
         // (non-UTF-8 bytes, permissions) fall through to issue_leaf just like parse errors —
         // only a readable, parseable cert that already covers the desired SANs short-circuits.
-        match (fs::read_to_string(&cert_path), fs::read_to_string(&key_path)) {
-            (Ok(cert), Ok(key)) => match leaf_covers(&cert, sans) {
-                Ok(true) => return Ok((cert, key)),
-                Ok(false) | Err(_) => {}
-            },
-            _ => {}
+        if let (Ok(cert), Ok(key)) = (
+            fs::read_to_string(&cert_path),
+            fs::read_to_string(&key_path),
+        ) {
+            if let Ok(true) = leaf_covers(&cert, sans) {
+                return Ok((cert, key));
+            }
         }
     }
     issue_leaf(sans)
@@ -280,7 +283,9 @@ fn issue_leaf(sans: &[String]) -> Result<(String, String)> {
         .iter()
         .map(|s| {
             Ok(SanType::DnsName(
-                s.as_str().try_into().with_context(|| format!("SAN `{s}`"))?,
+                s.as_str()
+                    .try_into()
+                    .with_context(|| format!("SAN `{s}`"))?,
             ))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -304,7 +309,10 @@ fn build_ca_params() -> CertificateParams {
     // Embed seconds-since-epoch in the OU so repeated installs are distinguishable in Keychain
     // Access — humans can tell two "Adjacent local" entries apart by clicking through.
     if let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) {
-        dn.push(DnType::OrganizationalUnitName, format!("ca-{}", now.as_secs()));
+        dn.push(
+            DnType::OrganizationalUnitName,
+            format!("ca-{}", now.as_secs()),
+        );
     }
     params.distinguished_name = dn;
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -354,7 +362,9 @@ fn write_private_pem(path: &Path, contents: &str) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut opts = fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true).mode(0o600);
-    let mut file = opts.open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut file = opts
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
     use std::io::Write;
     file.write_all(contents.as_bytes())
         .with_context(|| format!("writing {}", path.display()))?;
@@ -369,15 +379,20 @@ fn write_private_pem(path: &Path, contents: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the macOS keychain tests use the temp-home harness below.
+    #[cfg(target_os = "macos")]
     use std::sync::Mutex;
+    #[cfg(target_os = "macos")]
     use tempfile::TempDir;
 
     // `ADJACENT_HOME` is a process-global env var; cargo runs unit tests in parallel by default,
     // so two tests racing on set/remove will leak state across each other (the symptom is a
     // tempdir going out of scope while another test still expects it to exist). Serialize the
     // whole `with_temp_home` block to keep each test deterministic.
+    #[cfg(target_os = "macos")]
     static HOME_LOCK: Mutex<()> = Mutex::new(());
 
+    #[cfg(target_os = "macos")]
     fn with_temp_home<F: FnOnce()>(f: F) {
         let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = TempDir::new().expect("tempdir");
@@ -469,9 +484,24 @@ mod tests {
     fn registry_sans_adds_wildcard_per_base() {
         use crate::registry::AppEntry;
         let mut reg = Registry::default();
-        reg.insert("site".into(), AppEntry { path: "/tmp/a".into() });
-        reg.insert("feature-x.site".into(), AppEntry { path: "/tmp/b".into() });
-        reg.insert("api".into(), AppEntry { path: "/tmp/c".into() });
+        reg.insert(
+            "site".into(),
+            AppEntry {
+                path: "/tmp/a".into(),
+            },
+        );
+        reg.insert(
+            "feature-x.site".into(),
+            AppEntry {
+                path: "/tmp/b".into(),
+            },
+        );
+        reg.insert(
+            "api".into(),
+            AppEntry {
+                path: "/tmp/c".into(),
+            },
+        );
         let expected: Vec<String> = ["adj.ac", "*.adj.ac", "*.api.adj.ac", "*.site.adj.ac"]
             .iter()
             .map(|s| s.to_string())
@@ -513,9 +543,7 @@ mod tests {
                         .general_names
                         .iter()
                         .filter_map(|gn| match gn {
-                            x509_parser::extensions::GeneralName::DNSName(n) => {
-                                Some(n.to_string())
-                            }
+                            x509_parser::extensions::GeneralName::DNSName(n) => Some(n.to_string()),
                             _ => None,
                         })
                         .collect()
@@ -527,13 +555,24 @@ mod tests {
             let resolver = LeafResolver::new().expect("resolver");
             let before = resolver.current_cert_der();
             let mut reg = Registry::default();
-            reg.insert("feature-x.site".into(), AppEntry { path: "/tmp/a".into() });
+            reg.insert(
+                "feature-x.site".into(),
+                AppEntry {
+                    path: "/tmp/a".into(),
+                },
+            );
             reg.save().expect("save registry");
             resolver.reload().expect("reload");
             let after = resolver.current_cert_der();
             let wildcard = "*.site.adj.ac".to_string();
-            assert!(!dns_sans(&before).contains(&wildcard), "old cert must not cover it");
-            assert!(dns_sans(&after).contains(&wildcard), "reload must swap in the new leaf");
+            assert!(
+                !dns_sans(&before).contains(&wildcard),
+                "old cert must not cover it"
+            );
+            assert!(
+                dns_sans(&after).contains(&wildcard),
+                "reload must swap in the new leaf"
+            );
         });
     }
 

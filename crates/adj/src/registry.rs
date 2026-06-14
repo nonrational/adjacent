@@ -154,8 +154,7 @@ pub fn read_app_config(dir: &Path) -> Result<AppConfig> {
     }
     // Validate idle_timeout eagerly so a typo fails at `add`/`up` time, not silently.
     if let Some(s) = cfg.idle_timeout.as_deref() {
-        parse_idle_timeout(s)
-            .with_context(|| format!("parsing idle_timeout = \"{}\"", s))?;
+        parse_idle_timeout(s).with_context(|| format!("parsing idle_timeout = \"{}\"", s))?;
     }
     Ok(cfg)
 }
@@ -229,10 +228,22 @@ mod tests {
 
     #[test]
     fn parses_supported_units() {
-        assert_eq!(parse_idle_timeout("30s").unwrap(), Some(Duration::from_secs(30)));
-        assert_eq!(parse_idle_timeout("15m").unwrap(), Some(Duration::from_secs(900)));
-        assert_eq!(parse_idle_timeout("2h").unwrap(), Some(Duration::from_secs(7200)));
-        assert_eq!(parse_idle_timeout("250ms").unwrap(), Some(Duration::from_millis(250)));
+        assert_eq!(
+            parse_idle_timeout("30s").unwrap(),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            parse_idle_timeout("15m").unwrap(),
+            Some(Duration::from_secs(900))
+        );
+        assert_eq!(
+            parse_idle_timeout("2h").unwrap(),
+            Some(Duration::from_secs(7200))
+        );
+        assert_eq!(
+            parse_idle_timeout("250ms").unwrap(),
+            Some(Duration::from_millis(250))
+        );
     }
 
     #[test]
@@ -257,7 +268,10 @@ mod tests {
 
     #[test]
     fn idle_timeout_for_resolves_unset_valid_and_off() {
-        assert_eq!(idle_timeout_for(&cfg_with_idle_timeout(None)), Some(DEFAULT_IDLE_TIMEOUT));
+        assert_eq!(
+            idle_timeout_for(&cfg_with_idle_timeout(None)),
+            Some(DEFAULT_IDLE_TIMEOUT)
+        );
         assert_eq!(
             idle_timeout_for(&cfg_with_idle_timeout(Some("30s"))),
             Some(Duration::from_secs(30))
@@ -342,7 +356,10 @@ mod tests {
         )
         .expect("write toml");
         let err = read_app_config(tmp.path()).unwrap_err();
-        assert!(format!("{err:#}").contains('.'), "error should mention the dot: {err:#}");
+        assert!(
+            format!("{err:#}").contains('.'),
+            "error should mention the dot: {err:#}"
+        );
     }
 
     #[test]
@@ -373,14 +390,22 @@ mod tests {
                 format!("name = \"{ok}\"\ncmd = \"true\"\n"),
             )
             .expect("write toml");
-            assert!(read_app_config(tmp.path()).is_ok(), "name `{ok}` should be accepted");
+            assert!(
+                read_app_config(tmp.path()).is_ok(),
+                "name `{ok}` should be accepted"
+            );
         }
     }
 
     #[test]
     fn registry_remove_deletes_entry() {
         let mut reg = Registry::default();
-        reg.insert("site".into(), AppEntry { path: "/tmp/site".into() });
+        reg.insert(
+            "site".into(),
+            AppEntry {
+                path: "/tmp/site".into(),
+            },
+        );
         assert!(reg.remove("site").is_some());
         assert!(reg.get("site").is_none());
         assert!(reg.remove("site").is_none());

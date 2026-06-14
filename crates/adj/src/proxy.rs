@@ -359,11 +359,9 @@ async fn ensure_running(
     match wait_ready(name, supervisor.as_ref(), &cfg, deadline).await {
         Ok(port) => Ok(port),
         Err(crate::readiness::ReadinessError::Timeout) => Err(ProxyError::BootTimeout),
-        Err(crate::readiness::ReadinessError::Crashed { exit_code }) => {
-            Err(ProxyError::Other(anyhow!(
-                "app `{name}` crashed during boot (exit {exit_code})"
-            )))
-        }
+        Err(crate::readiness::ReadinessError::Crashed { exit_code }) => Err(ProxyError::Other(
+            anyhow!("app `{name}` crashed during boot (exit {exit_code})"),
+        )),
     }
 }
 
@@ -581,7 +579,12 @@ mod tests {
     #[test]
     fn forwarded_headers_set_on_clean_request() {
         let mut headers = hyper::HeaderMap::new();
-        set_forwarded_headers(&mut headers, "echo.adj.ac", "127.0.0.1".parse().unwrap(), "http");
+        set_forwarded_headers(
+            &mut headers,
+            "echo.adj.ac",
+            "127.0.0.1".parse().unwrap(),
+            "http",
+        );
         assert_eq!(headers["x-forwarded-host"], "echo.adj.ac");
         assert_eq!(headers["x-forwarded-for"], "127.0.0.1");
         assert_eq!(headers["x-forwarded-proto"], "http");
@@ -591,7 +594,12 @@ mod tests {
     fn forwarded_for_appends_to_existing_value() {
         let mut headers = hyper::HeaderMap::new();
         headers.insert("x-forwarded-for", "10.0.0.1".parse().unwrap());
-        set_forwarded_headers(&mut headers, "echo.adj.ac", "127.0.0.1".parse().unwrap(), "https");
+        set_forwarded_headers(
+            &mut headers,
+            "echo.adj.ac",
+            "127.0.0.1".parse().unwrap(),
+            "https",
+        );
         assert_eq!(headers["x-forwarded-for"], "10.0.0.1, 127.0.0.1");
         assert_eq!(headers["x-forwarded-proto"], "https");
     }
@@ -603,8 +611,16 @@ mod tests {
         let mut headers = hyper::HeaderMap::new();
         headers.append("x-forwarded-for", "10.0.0.1".parse().unwrap());
         headers.append("x-forwarded-for", "192.168.1.1".parse().unwrap());
-        set_forwarded_headers(&mut headers, "echo.adj.ac", "127.0.0.1".parse().unwrap(), "http");
-        assert_eq!(headers["x-forwarded-for"], "10.0.0.1, 192.168.1.1, 127.0.0.1");
+        set_forwarded_headers(
+            &mut headers,
+            "echo.adj.ac",
+            "127.0.0.1".parse().unwrap(),
+            "http",
+        );
+        assert_eq!(
+            headers["x-forwarded-for"],
+            "10.0.0.1, 192.168.1.1, 127.0.0.1"
+        );
         // The collapse must leave exactly one line behind.
         assert_eq!(headers.get_all("x-forwarded-for").iter().count(), 1);
     }
@@ -614,7 +630,12 @@ mod tests {
         // In the default no-pfctl setup the browser sends `Host: name.adj.ac:8080`; the upstream
         // must see that port via X-Forwarded-Host to reconstruct a routable origin.
         let mut headers = hyper::HeaderMap::new();
-        set_forwarded_headers(&mut headers, "echo.adj.ac:8080", "127.0.0.1".parse().unwrap(), "http");
+        set_forwarded_headers(
+            &mut headers,
+            "echo.adj.ac:8080",
+            "127.0.0.1".parse().unwrap(),
+            "http",
+        );
         assert_eq!(headers["x-forwarded-host"], "echo.adj.ac:8080");
     }
 
@@ -623,7 +644,10 @@ mod tests {
         assert_eq!(name_from_host("echo.adj.ac"), Some("echo".into()));
         assert_eq!(name_from_host("ECHO.adj.ac"), Some("echo".into()));
         // Worktree instances are `<label>.<name>` — exactly one dot in the prefix.
-        assert_eq!(name_from_host("feature-x.site.adj.ac"), Some("feature-x.site".into()));
+        assert_eq!(
+            name_from_host("feature-x.site.adj.ac"),
+            Some("feature-x.site".into())
+        );
         // Deeper nesting is not a registrable key.
         assert_eq!(name_from_host("a.b.c.adj.ac"), None);
         // Empty labels on either side of the dot are invalid.

@@ -50,8 +50,7 @@ fn into_error(resp: Response) -> Result<Response> {
 pub async fn add(path: String, label: Option<String>) -> Result<()> {
     // Canonicalize on the client side: relative paths must resolve against the user's CWD,
     // not the daemon's. The daemon may have been launched from anywhere (or by launchd).
-    let canon = std::fs::canonicalize(&path)
-        .with_context(|| format!("resolving path {}", path))?;
+    let canon = std::fs::canonicalize(&path).with_context(|| format!("resolving path {}", path))?;
     // `--label` wins; otherwise a linked git worktree names its instance after the branch.
     let label = match label {
         Some(l) => Some(l),

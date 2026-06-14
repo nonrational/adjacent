@@ -167,8 +167,8 @@ async fn write_marker(dir: &Path, marker: &str) {
 
 /// Send an HTTP GET to the proxy with the given Host header, return (status_line, body).
 fn http_get(proxy_port: u16, host: &str, path: &str) -> Result<(String, String), String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", proxy_port))
-        .map_err(|e| format!("connect: {e}"))?;
+    let mut stream =
+        TcpStream::connect(("127.0.0.1", proxy_port)).map_err(|e| format!("connect: {e}"))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(70)))
         .map_err(|e| format!("set_read_timeout: {e}"))?;
@@ -224,14 +224,16 @@ async fn label_flag_registers_routable_instance() {
     let stdout = String::from_utf8_lossy(&add.stdout);
     assert!(stdout.contains("demo.site"), "stdout: {stdout}");
 
-    let (status_line, body) =
-        http_get_async(sandbox.proxy_port, "demo.site.adj.ac", "/").await;
+    let (status_line, body) = http_get_async(sandbox.proxy_port, "demo.site.adj.ac", "/").await;
     assert!(status_line.contains(" 200 "), "status: {status_line}");
     assert!(body.contains("hello-from-instance"), "body: {body}");
 
     // Only the instance was registered — the bare name must not resolve.
     let (nf_status, _) = http_get_async(sandbox.proxy_port, "site.adj.ac", "/").await;
-    assert!(nf_status.contains(" 404 "), "expected 404 for bare name: {nf_status}");
+    assert!(
+        nf_status.contains(" 404 "),
+        "expected 404 for bare name: {nf_status}"
+    );
 
     // Invalid labels are rejected daemon-side.
     let bad = sandbox
@@ -243,7 +245,10 @@ async fn label_flag_registers_routable_instance() {
         .output()
         .await
         .expect("add bad label");
-    assert!(!bad.status.success(), "uppercase/underscore label must be rejected");
+    assert!(
+        !bad.status.success(),
+        "uppercase/underscore label must be rejected"
+    );
 
     let _ = sandbox.cmd().arg("down").arg("demo.site").output().await;
     sandbox.stop_daemon().await;
@@ -271,17 +276,38 @@ async fn worktree_add_derives_label_from_branch() {
     let wt = wt_parent.path().join("wt");
     git(
         repo.path(),
-        &["worktree", "add", "-b", "agents/Fix_Thing", wt.to_str().unwrap()],
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "agents/Fix_Thing",
+            wt.to_str().unwrap(),
+        ],
     )
     .await;
     write_marker(&wt, "from-worktree").await;
 
-    let add_main = sandbox.cmd().arg("add").arg(repo.path()).output().await.expect("add main");
+    let add_main = sandbox
+        .cmd()
+        .arg("add")
+        .arg(repo.path())
+        .output()
+        .await
+        .expect("add main");
     assert!(add_main.status.success(), "add main: {add_main:?}");
     let main_out = String::from_utf8_lossy(&add_main.stdout);
-    assert!(main_out.contains("`site`"), "main registered bare: {main_out}");
+    assert!(
+        main_out.contains("`site`"),
+        "main registered bare: {main_out}"
+    );
 
-    let add_wt = sandbox.cmd().arg("add").arg(&wt).output().await.expect("add wt");
+    let add_wt = sandbox
+        .cmd()
+        .arg("add")
+        .arg(&wt)
+        .output()
+        .await
+        .expect("add wt");
     assert!(add_wt.status.success(), "add wt: {add_wt:?}");
     let wt_out = String::from_utf8_lossy(&add_wt.stdout);
     assert!(
@@ -293,13 +319,17 @@ async fn worktree_add_derives_label_from_branch() {
     assert!(s1.contains(" 200 "), "main status: {s1}");
     assert!(b1.contains("from-main"), "main body: {b1}");
 
-    let (s2, b2) =
-        http_get_async(sandbox.proxy_port, "agents-fix-thing.site.adj.ac", "/").await;
+    let (s2, b2) = http_get_async(sandbox.proxy_port, "agents-fix-thing.site.adj.ac", "/").await;
     assert!(s2.contains(" 200 "), "worktree status: {s2}");
     assert!(b2.contains("from-worktree"), "worktree body: {b2}");
 
     let _ = sandbox.cmd().arg("down").arg("site").output().await;
-    let _ = sandbox.cmd().arg("down").arg("agents-fix-thing.site").output().await;
+    let _ = sandbox
+        .cmd()
+        .arg("down")
+        .arg("agents-fix-thing.site")
+        .output()
+        .await;
     sandbox.stop_daemon().await;
 }
 
@@ -323,10 +353,19 @@ async fn detached_worktree_requires_explicit_label() {
     )
     .await;
 
-    let add = sandbox.cmd().arg("add").arg(&wt).output().await.expect("add");
+    let add = sandbox
+        .cmd()
+        .arg("add")
+        .arg(&wt)
+        .output()
+        .await
+        .expect("add");
     assert!(!add.status.success(), "detached worktree add must fail");
     let stderr = String::from_utf8_lossy(&add.stderr);
-    assert!(stderr.contains("--label"), "error should point at --label: {stderr}");
+    assert!(
+        stderr.contains("--label"),
+        "error should point at --label: {stderr}"
+    );
 
     sandbox.stop_daemon().await;
 }
@@ -354,7 +393,13 @@ async fn prune_clears_deleted_worktrees() {
     write_marker(&wt, "from-worktree").await;
 
     for dir in [repo.path(), wt.as_path()] {
-        let add = sandbox.cmd().arg("add").arg(dir).output().await.expect("add");
+        let add = sandbox
+            .cmd()
+            .arg("add")
+            .arg(dir)
+            .output()
+            .await
+            .expect("add");
         assert!(add.status.success(), "add {dir:?}: {add:?}");
     }
 
@@ -366,9 +411,13 @@ async fn prune_clears_deleted_worktrees() {
     std::fs::remove_dir_all(&wt).expect("delete worktree");
 
     // list --json flags the dead entry; the healthy one carries no `stale` key.
-    let list = sandbox.cmd().args(["list", "--json"]).output().await.expect("list");
-    let entries: serde_json::Value =
-        serde_json::from_slice(&list.stdout).expect("parse list json");
+    let list = sandbox
+        .cmd()
+        .args(["list", "--json"])
+        .output()
+        .await
+        .expect("list");
+    let entries: serde_json::Value = serde_json::from_slice(&list.stdout).expect("parse list json");
     let by_name = |name: &str| -> serde_json::Value {
         entries
             .as_array()
@@ -387,16 +436,27 @@ async fn prune_clears_deleted_worktrees() {
     // Requests to a stale entry get a 502 that names the fix.
     let (stale_status, stale_body) =
         http_get_async(sandbox.proxy_port, "feature-x.site.adj.ac", "/").await;
-    assert!(stale_status.contains(" 502 "), "stale status: {stale_status}");
+    assert!(
+        stale_status.contains(" 502 "),
+        "stale status: {stale_status}"
+    );
     assert!(stale_body.contains("adj prune"), "stale body: {stale_body}");
 
     // Prune removes exactly the stale entry and reports it.
     let prune = sandbox.cmd().arg("prune").output().await.expect("prune");
     assert!(prune.status.success(), "prune: {prune:?}");
     let prune_out = String::from_utf8_lossy(&prune.stdout);
-    assert!(prune_out.contains("feature-x.site"), "prune stdout: {prune_out}");
+    assert!(
+        prune_out.contains("feature-x.site"),
+        "prune stdout: {prune_out}"
+    );
 
-    let list2 = sandbox.cmd().args(["list", "--json"]).output().await.expect("list2");
+    let list2 = sandbox
+        .cmd()
+        .args(["list", "--json"])
+        .output()
+        .await
+        .expect("list2");
     let entries2: serde_json::Value =
         serde_json::from_slice(&list2.stdout).expect("parse list2 json");
     let names: Vec<&str> = entries2
@@ -410,7 +470,10 @@ async fn prune_clears_deleted_worktrees() {
     // A second prune is a no-op.
     let prune2 = sandbox.cmd().arg("prune").output().await.expect("prune2");
     let prune2_out = String::from_utf8_lossy(&prune2.stdout);
-    assert!(prune2_out.contains("nothing to prune"), "prune2: {prune2_out}");
+    assert!(
+        prune2_out.contains("nothing to prune"),
+        "prune2: {prune2_out}"
+    );
 
     let _ = sandbox.cmd().arg("down").arg("site").output().await;
     sandbox.stop_daemon().await;
@@ -426,14 +489,26 @@ async fn remove_stops_and_deregisters_one_app() {
     write_marker(app_dir.path(), "removable").await;
     write_app(app_dir.path(), "gone").await;
 
-    let add = sandbox.cmd().arg("add").arg(app_dir.path()).output().await.expect("add");
+    let add = sandbox
+        .cmd()
+        .arg("add")
+        .arg(app_dir.path())
+        .output()
+        .await
+        .expect("add");
     assert!(add.status.success(), "add: {add:?}");
 
     // Boot it so remove exercises the down-first path.
     let (s, _) = http_get_async(sandbox.proxy_port, "gone.adj.ac", "/").await;
     assert!(s.contains(" 200 "), "boot: {s}");
 
-    let rm = sandbox.cmd().arg("remove").arg("gone").output().await.expect("remove");
+    let rm = sandbox
+        .cmd()
+        .arg("remove")
+        .arg("gone")
+        .output()
+        .await
+        .expect("remove");
     assert!(rm.status.success(), "remove: {rm:?}");
     assert!(String::from_utf8_lossy(&rm.stdout).contains("gone"));
 
@@ -441,7 +516,13 @@ async fn remove_stops_and_deregisters_one_app() {
     assert!(nf.contains(" 404 "), "after remove: {nf}");
 
     // Removing an unknown name is an error.
-    let rm2 = sandbox.cmd().arg("remove").arg("gone").output().await.expect("remove2");
+    let rm2 = sandbox
+        .cmd()
+        .arg("remove")
+        .arg("gone")
+        .output()
+        .await
+        .expect("remove2");
     assert!(!rm2.status.success(), "second remove must fail");
 
     sandbox.stop_daemon().await;
@@ -457,16 +538,33 @@ async fn removed_app_reregisters_with_clean_state() {
     let crash_dir = TempDir::new().expect("crash dir");
     write_app_with_cmd(crash_dir.path(), "phoenix", "exit 7").await;
 
-    let add = sandbox.cmd().arg("add").arg(crash_dir.path()).output().await.expect("add");
+    let add = sandbox
+        .cmd()
+        .arg("add")
+        .arg(crash_dir.path())
+        .output()
+        .await
+        .expect("add");
     assert!(add.status.success(), "add: {add:?}");
 
     // Explicitly boot it so the supervisor has a Running → Crashed transition to record.
-    let _ = sandbox.cmd().arg("up").arg("phoenix").output().await.expect("up");
+    let _ = sandbox
+        .cmd()
+        .arg("up")
+        .arg("phoenix")
+        .output()
+        .await
+        .expect("up");
 
     // Poll until the supervisor records the crash (the wait task is async; give it 5s).
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let list = sandbox.cmd().args(["list", "--json"]).output().await.expect("list");
+        let list = sandbox
+            .cmd()
+            .args(["list", "--json"])
+            .output()
+            .await
+            .expect("list");
         let entries: serde_json::Value = serde_json::from_slice(&list.stdout).expect("parse");
         let state = entries
             .as_array()
@@ -487,15 +585,32 @@ async fn removed_app_reregisters_with_clean_state() {
     }
 
     // Remove and immediately re-add the same directory.
-    let rm = sandbox.cmd().arg("remove").arg("phoenix").output().await.expect("remove");
+    let rm = sandbox
+        .cmd()
+        .arg("remove")
+        .arg("phoenix")
+        .output()
+        .await
+        .expect("remove");
     assert!(rm.status.success(), "remove: {rm:?}");
 
-    let add2 = sandbox.cmd().arg("add").arg(crash_dir.path()).output().await.expect("re-add");
+    let add2 = sandbox
+        .cmd()
+        .arg("add")
+        .arg(crash_dir.path())
+        .output()
+        .await
+        .expect("re-add");
     assert!(add2.status.success(), "re-add: {add2:?}");
 
     // The re-added app must start from a clean Stopped slate — not the pre-remove Crashed state.
     // Without supervisor::forget() the old AppRuntime lingers and list reports "crashed".
-    let list = sandbox.cmd().args(["list", "--json"]).output().await.expect("list2");
+    let list = sandbox
+        .cmd()
+        .args(["list", "--json"])
+        .output()
+        .await
+        .expect("list2");
     let entries: serde_json::Value = serde_json::from_slice(&list.stdout).expect("parse2");
     let entry = entries
         .as_array()
@@ -595,7 +710,13 @@ async fn idle_scanner_reaps_deregistered_running_app() {
     .await
     .expect("write toml");
 
-    let add = sandbox.cmd().arg("add").arg(app_dir.path()).output().await.expect("add");
+    let add = sandbox
+        .cmd()
+        .arg("add")
+        .arg(app_dir.path())
+        .output()
+        .await
+        .expect("add");
     assert!(add.status.success(), "add: {add:?}");
 
     // Boot it.
@@ -605,13 +726,21 @@ async fn idle_scanner_reaps_deregistered_running_app() {
     // Drop the registry row directly, leaving the supervisor with a Running entry and no registry
     // backing — the exact state the documented resurrection race produces.
     let registry_path = sandbox.home_path.join("registry.toml");
-    tokio::fs::write(&registry_path, "").await.expect("truncate registry");
+    tokio::fs::write(&registry_path, "")
+        .await
+        .expect("truncate registry");
 
     // Give the 500ms scanner several sweeps to observe the unregistered-but-running app and reap
     // it, then re-register the same directory so `status` (which requires a registry row) can read
     // the supervisor's post-reap state.
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    let readd = sandbox.cmd().arg("add").arg(app_dir.path()).output().await.expect("re-add");
+    let readd = sandbox
+        .cmd()
+        .arg("add")
+        .arg(app_dir.path())
+        .output()
+        .await
+        .expect("re-add");
     assert!(readd.status.success(), "re-add: {readd:?}");
 
     let deadline = Instant::now() + Duration::from_secs(5);

@@ -440,10 +440,7 @@ mod tests {
         // a real crash as Crashed.
         assert_eq!(sup.intentional_stop_flag("hot").await, Some(false));
         // And the state is still Running.
-        assert!(matches!(
-            sup.state("hot").await,
-            AppState::Running { .. }
-        ));
+        assert!(matches!(sup.state("hot").await, AppState::Running { .. }));
     }
 
     #[tokio::test]

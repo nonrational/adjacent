@@ -15,7 +15,9 @@ use std::process::Command;
 use anyhow::Result;
 
 use crate::portforward;
-use crate::proxy::{https_port as daemon_https_port, proxy_port as daemon_http_port, VERIFY_BODY, VERIFY_HOST};
+use crate::proxy::{
+    https_port as daemon_https_port, proxy_port as daemon_http_port, VERIFY_BODY, VERIFY_HOST,
+};
 use crate::tls;
 
 const DOCTOR_HTTP_PORT_ENV: &str = "ADJACENT_DOCTOR_HTTP_PORT";
@@ -50,13 +52,25 @@ struct Check {
 
 impl Check {
     fn pass(name: impl Into<String>, detail: impl Into<String>) -> Self {
-        Self { name: name.into(), status: Status::Pass, detail: detail.into() }
+        Self {
+            name: name.into(),
+            status: Status::Pass,
+            detail: detail.into(),
+        }
     }
     fn fail(name: impl Into<String>, detail: impl Into<String>) -> Self {
-        Self { name: name.into(), status: Status::Fail, detail: detail.into() }
+        Self {
+            name: name.into(),
+            status: Status::Fail,
+            detail: detail.into(),
+        }
     }
     fn skip(name: impl Into<String>, detail: impl Into<String>) -> Self {
-        Self { name: name.into(), status: Status::Skip, detail: detail.into() }
+        Self {
+            name: name.into(),
+            status: Status::Skip,
+            detail: detail.into(),
+        }
     }
 }
 
@@ -66,7 +80,10 @@ pub fn run() -> Result<()> {
     print_section("Port Forwarding", &port_forward);
     println!();
     print_section("TLS Certificate Authority", &ca);
-    let failed = port_forward.iter().chain(ca.iter()).any(|c| c.status == Status::Fail);
+    let failed = port_forward
+        .iter()
+        .chain(ca.iter())
+        .any(|c| c.status == Status::Fail);
     if failed {
         // 2 distinguishes "the doctor ran and found problems" from the generic adj-error 1.
         std::process::exit(2);
@@ -217,9 +234,9 @@ fn check_ca_cert() -> Check {
         Err(e) => return Check::fail(name, format!("parsing nameConstraints: {e}")),
     };
     let permitted = nc.value.permitted_subtrees.as_deref().unwrap_or(&[]);
-    let scoped = permitted.iter().any(|s| {
-        matches!(&s.base, x509_parser::extensions::GeneralName::DNSName(n) if *n == "adj.ac")
-    });
+    let scoped = permitted.iter().any(
+        |s| matches!(&s.base, x509_parser::extensions::GeneralName::DNSName(n) if *n == "adj.ac"),
+    );
     if !scoped {
         return Check::fail(name, "nameConstraints does not permit adj.ac");
     }
@@ -265,10 +282,7 @@ fn check_ca_sign_canary() -> Check {
 
 #[cfg(not(target_os = "macos"))]
 fn check_ca_sign_canary() -> Check {
-    Check::skip(
-        "keychain key signs",
-        "keychain backend is macOS-only",
-    )
+    Check::skip("keychain key signs", "keychain backend is macOS-only")
 }
 
 fn check_system_trust() -> Check {

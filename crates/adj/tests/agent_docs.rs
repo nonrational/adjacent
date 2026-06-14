@@ -87,7 +87,10 @@ async fn emits_markdown_templated_with_app_name_and_cmd() {
         "adj restart myapp",
         "adj wait-ready myapp",
     ] {
-        assert!(stdout.contains(needle), "stdout missing `{needle}`: {stdout}");
+        assert!(
+            stdout.contains(needle),
+            "stdout missing `{needle}`: {stdout}"
+        );
     }
     // Proxy URL pattern.
     assert!(
@@ -198,7 +201,10 @@ async fn worktree_uses_instance_key_not_bare_name() {
         "adj wait-ready feature-x.site",
         "feature-x.site.adj.ac",
     ] {
-        assert!(stdout.contains(needle), "stdout missing `{needle}`: {stdout}");
+        assert!(
+            stdout.contains(needle),
+            "stdout missing `{needle}`: {stdout}"
+        );
     }
 
     // The bare name must not appear on its own as a subcommand target or URL — that would steer

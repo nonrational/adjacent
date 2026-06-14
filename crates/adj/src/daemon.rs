@@ -200,7 +200,9 @@ async fn dispatch(
         Request::Restart { name } => restart(name, supervisor).await,
         Request::Status { name } => status(name, supervisor).await,
         Request::LogPath { name } => log_path(name).await,
-        Request::WaitReady { name, timeout_secs } => wait_ready(name, timeout_secs, supervisor).await,
+        Request::WaitReady { name, timeout_secs } => {
+            wait_ready(name, timeout_secs, supervisor).await
+        }
         Request::Remove { name } => remove(name, supervisor, registry_lock, resolver).await,
         Request::Prune => prune(supervisor, registry_lock, resolver).await,
     }
@@ -291,9 +293,7 @@ async fn idle_scanner(supervisor: Arc<Supervisor>) {
                 continue;
             };
             if idle_for >= window {
-                tracing::info!(
-                    "stopping `{name}` after {idle_for:?} idle (threshold {window:?})"
-                );
+                tracing::info!("stopping `{name}` after {idle_for:?} idle (threshold {window:?})");
                 match supervisor.down_if_idle(&name, window).await {
                     Ok(true) => {}
                     Ok(false) => {
@@ -332,8 +332,8 @@ async fn add(
             path
         ));
     }
-    let canon = std::fs::canonicalize(&candidate)
-        .with_context(|| format!("resolving path {}", path))?;
+    let canon =
+        std::fs::canonicalize(&candidate).with_context(|| format!("resolving path {}", path))?;
     let cfg = registry::read_app_config(&canon)?;
     if RESERVED_NAMES.contains(&cfg.name.as_str()) {
         return Err(anyhow!(
