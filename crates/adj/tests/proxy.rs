@@ -135,6 +135,63 @@ ThreadingHTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
     format!("exec /usr/bin/python3 {}", script.display())
 }
 
+/// Write a minimal WebSocket echo server (handshake + unmask + echo) to `dir/ws.py` and return
+/// the shell command that runs it. Python because the stdlib has everything needed (sha1,
+/// base64, socketserver) — no npm install in the test sandbox. Frames are assumed < 126 bytes
+/// and client-masked, which is all the test client sends.
+async fn write_ws_echo_server(dir: &Path) -> String {
+    let py = r#"import os, base64, hashlib, socketserver
+
+GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+class H(socketserver.StreamRequestHandler):
+    def handle(self):
+        # Readiness probes TCP-connect and close; an empty first line means no request came.
+        if not self.rfile.readline():
+            return
+        headers = {}
+        while True:
+            line = self.rfile.readline()
+            if line in (b"\r\n", b"\n", b""):
+                break
+            if b":" in line:
+                k, v = line.split(b":", 1)
+                headers[k.strip().lower()] = v.strip()
+        key = headers.get(b"sec-websocket-key")
+        if key is None:
+            self.request.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+            return
+        accept = base64.b64encode(hashlib.sha1(key + GUID).digest())
+        self.request.sendall(
+            b"HTTP/1.1 101 Switching Protocols\r\n"
+            b"Upgrade: websocket\r\n"
+            b"Connection: Upgrade\r\n"
+            b"Sec-WebSocket-Accept: " + accept + b"\r\n\r\n"
+        )
+        while True:
+            hdr = self.rfile.read(2)
+            if len(hdr) < 2:
+                return
+            opcode = hdr[0] & 0x0F
+            if opcode == 8:  # close
+                return
+            length = hdr[1] & 0x7F
+            mask = self.rfile.read(4)
+            payload = bytearray(self.rfile.read(length))
+            for i in range(length):
+                payload[i] ^= mask[i % 4]
+            self.request.sendall(bytes([0x81, length]) + bytes(payload))
+
+class S(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+
+S(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
+"#;
+    let script = dir.join("ws.py");
+    tokio::fs::write(&script, py).await.expect("write ws.py");
+    format!("exec /usr/bin/python3 {}", script.display())
+}
+
 /// Send an HTTP GET to the proxy with the given Host header, return (status_line, body).
 fn http_get(proxy_port: u16, host: &str, path: &str) -> Result<(String, String), String> {
     let mut stream = TcpStream::connect(("127.0.0.1", proxy_port))
@@ -250,6 +307,139 @@ async fn verify_marker_short_circuits_before_boot_gate() {
     let stdout = String::from_utf8_lossy(&list.stdout);
     assert_eq!(stdout.trim(), "[]", "no apps should have been registered");
 
+    sandbox.stop_daemon().await;
+}
+
+/// Read exactly `n` bytes from the stream.
+fn read_exact_n(stream: &mut TcpStream, n: usize) -> Result<Vec<u8>, String> {
+    let mut buf = vec![0u8; n];
+    stream
+        .read_exact(&mut buf)
+        .map_err(|e| format!("read_exact({n}): {e}"))?;
+    Ok(buf)
+}
+
+/// Send one masked client text frame, read back one unmasked server frame, return its payload.
+/// Raw frame I/O instead of a WS client crate keeps the dev-dependency surface at zero.
+fn ws_echo_roundtrip(stream: &mut TcpStream, msg: &str) -> Result<String, String> {
+    let mask = [0x12u8, 0x34, 0x56, 0x78];
+    let payload = msg.as_bytes();
+    assert!(payload.len() < 126, "test frames must fit a 7-bit length");
+    let mut frame = vec![0x81, 0x80 | payload.len() as u8];
+    frame.extend_from_slice(&mask);
+    frame.extend(
+        payload
+            .iter()
+            .enumerate()
+            .map(|(i, b)| b ^ mask[i % 4]),
+    );
+    stream
+        .write_all(&frame)
+        .map_err(|e| format!("write frame: {e}"))?;
+
+    let hdr = read_exact_n(stream, 2)?;
+    if hdr[0] != 0x81 {
+        return Err(format!("expected FIN text frame, got first byte {:#04x}", hdr[0]));
+    }
+    let len = (hdr[1] & 0x7F) as usize;
+    let body = read_exact_n(stream, len)?;
+    String::from_utf8(body).map_err(|e| format!("payload not utf8: {e}"))
+}
+
+/// Issue #25: WebSocket upgrades must propagate through the proxy — handshake completes with a
+/// 101, frames flow both ways afterwards, and a close from one side tears the tunnel down so the
+/// peer sees EOF. This is the path Vite/Webpack/Next HMR rides on.
+#[tokio::test]
+async fn proxy_propagates_websocket_upgrade_and_pipes_frames() {
+    let mut sandbox = Sandbox::new().await;
+    sandbox.start_daemon().await;
+
+    let app_dir = TempDir::new().expect("app dir");
+    let cmd = write_ws_echo_server(app_dir.path()).await;
+    write_app(app_dir.path(), "ws", &cmd).await;
+
+    let add = sandbox
+        .cmd()
+        .arg("add")
+        .arg(app_dir.path())
+        .output()
+        .await
+        .expect("add");
+    assert!(add.status.success(), "add: {:?}", add);
+
+    let proxy_port = sandbox.proxy_port;
+    tokio::task::spawn_blocking(move || {
+        let mut stream =
+            TcpStream::connect(("127.0.0.1", proxy_port)).expect("connect proxy");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(70)))
+            .expect("set_read_timeout");
+
+        let req = "GET /ws HTTP/1.1\r\n\
+                   Host: ws.adj.ac\r\n\
+                   Connection: Upgrade\r\n\
+                   Upgrade: websocket\r\n\
+                   Sec-WebSocket-Version: 13\r\n\
+                   Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+        stream.write_all(req.as_bytes()).expect("write handshake");
+
+        // Read the response head byte-by-byte up to the blank line — the upgraded stream
+        // starts immediately after it and must not be swallowed by an over-eager buffer.
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            let mut byte = [0u8; 1];
+            stream.read_exact(&mut byte).expect("read response head");
+            head.push(byte[0]);
+        }
+        let head = String::from_utf8_lossy(&head).to_string();
+        let status_line = head.lines().next().unwrap_or("").to_string();
+        assert!(
+            status_line.contains(" 101 "),
+            "expected 101 Switching Protocols, got: {status_line}\nfull head:\n{head}"
+        );
+        // Pin the handshake *value*, not just header presence. The RFC 6455 sample key
+        // `dGhlIHNhbXBsZSBub25jZQ==` derives the well-known accept `s3pPLMBiTxaQ9kYGzzhZRbK+xOo=`;
+        // asserting it proves the proxy relays the header bytes unchanged rather than merely that
+        // some accept header exists. hyper may normalize the header *name* casing, so match the
+        // name case-insensitively but compare the base64 value exactly (it is case-sensitive).
+        let accept = head
+            .lines()
+            .find_map(|l| {
+                let (name, value) = l.split_once(':')?;
+                name.trim()
+                    .eq_ignore_ascii_case("sec-websocket-accept")
+                    .then(|| value.trim())
+            })
+            .unwrap_or_else(|| panic!("no Sec-WebSocket-Accept header in response head:\n{head}"));
+        assert_eq!(
+            accept, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=",
+            "accept value must match the RFC 6455 derivation for the sample key"
+        );
+
+        // Two round-trips prove the tunnel stays open for continued bidirectional traffic,
+        // not just a single buffered flush at upgrade time.
+        let echo1 = ws_echo_roundtrip(&mut stream, "ping-1").expect("roundtrip 1");
+        assert_eq!(echo1, "ping-1");
+        let echo2 = ws_echo_roundtrip(&mut stream, "ping-2").expect("roundtrip 2");
+        assert_eq!(echo2, "ping-2");
+
+        // Close half of AC #2 ("until either side closes"): send a masked close frame. The echo
+        // server returns on opcode 8, dropping its connection; copy_bidirectional must propagate
+        // that shutdown so our next read hits EOF rather than hanging to the 70s read timeout.
+        let close = [0x88u8, 0x80, 0x12, 0x34, 0x56, 0x78];
+        stream.write_all(&close).expect("write close frame");
+        let mut tail = [0u8; 1];
+        let n = stream.read(&mut tail).expect("read after close");
+        assert_eq!(
+            n, 0,
+            "expected EOF after the upstream closed, got byte {:#04x}",
+            tail[0]
+        );
+    })
+    .await
+    .expect("join ws client");
+
+    let _ = sandbox.cmd().arg("down").arg("ws").output().await;
     sandbox.stop_daemon().await;
 }
 
@@ -370,6 +560,11 @@ async fn install_port_forward_prints_pf_anchor_and_sudo_commands() {
     );
     // Sudo command shape.
     assert!(stdout.contains("sudo pfctl"), "missing sudo pfctl: {stdout}");
+    // The reload pipeline replaces the active NAT ruleset — output must warn about it.
+    assert!(
+        stdout.contains("replaces the active NAT ruleset"),
+        "missing NAT-replacement warning: {stdout}"
+    );
     // Target proxy port matches the sandbox override.
     assert!(
         stdout.contains(&format!("port {}", sandbox.proxy_port)),

@@ -48,6 +48,9 @@ pub fn install() -> Result<()> {
     print!("{anchor_body}");
     println!("EOF'");
     println!("sudo pfctl -a {ANCHOR_NAME} -f {anchor_path}");
+    println!("# Note: the next command replaces the active NAT ruleset (current rules are");
+    println!("# re-read via `pfctl -sn` and reloaded with the anchor prepended). If you manage");
+    println!("# pf NAT rules outside /etc/pf.conf, review before running.");
     println!("(echo 'rdr-anchor \"{ANCHOR_NAME}\" all'; sudo pfctl -sn 2>/dev/null) | sudo pfctl -f -");
     println!("sudo pfctl -E");
     Ok(())

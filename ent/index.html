@@ -144,16 +144,16 @@
           <p>The same commands for human and agent &mdash; every read takes <code>--json</code>. No separate agent mode, so the two sides can't drift.</p>
         </div>
         <div>
-          <h3>Lazy boot</h3>
-          <p>Nothing runs until a request hits <code>name.adj.ac</code>. Concurrent requests during boot wait on the same start.</p>
+          <h3>A URL per worktree</h3>
+          <p>Run several agents in parallel git worktrees of one repo. <code>adj add</code> names each instance after its branch &mdash; <code>feature-x.site.adj.ac</code> &mdash; with its own process, port and logs.</p>
+        </div>
+        <div>
+          <h3>Boots on demand, stops when idle</h3>
+          <p>Nothing runs until a request hits <code>name.adj.ac</code>; concurrent boots wait on the same start. No traffic for 15 minutes and it stops &mdash; long agent sessions don't pile up orphaned servers.</p>
         </div>
         <div>
           <h3>Ready means ready</h3>
           <p>The proxy never forwards to a half-booted process. TCP-open by default, or poll a health check URL for a 2xx.</p>
-        </div>
-        <div>
-          <h3>Idle shutdown by default</h3>
-          <p>No traffic for 15 minutes and the app stops. Long agent sessions don't accumulate orphaned servers.</p>
         </div>
         <div>
           <h3>TLS without a key on disk</h3>

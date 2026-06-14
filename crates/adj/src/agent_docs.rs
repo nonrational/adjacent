@@ -1,8 +1,9 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
 use crate::registry;
+use crate::worktree;
 
 /// Print a markdown steering doc telling AI coding agents how to interact with the
 /// Adjacent-supervised app at `path` (or the current directory when `path` is `None`).
@@ -15,8 +16,49 @@ pub fn emit(path: Option<String>) -> Result<()> {
         None => std::env::current_dir().context("resolving current directory")?,
     };
     let cfg = registry::read_app_config(&dir)?;
-    print!("{}", render(&cfg.name, &cfg.cmd));
+    // Steer the agent at the instance key the daemon will actually route to. Prefer the key this
+    // directory is registered under: an explicit `adj add --label` can differ from the branch,
+    // and re-deriving from the branch here would point every command and URL at an unregistered
+    // instance. Only when the dir isn't registered yet (the pre-`adj add` bootstrap case) do we
+    // fall back to deriving the worktree label the same way `client::add` would.
+    let key = match registered_key(&dir, &cfg.name) {
+        Some(k) => k,
+        None => derive_key(&dir, &cfg.name),
+    };
+    print!("{}", render(&key, &cfg.cmd));
     Ok(())
+}
+
+/// The registry key whose entry points at `dir`, if this directory is registered. Matches on the
+/// canonical path (registry entries are stored canonical) and restricts to keys whose base equals
+/// the manifest `name`, so a stale entry for a different app at a reused path can't mislabel the
+/// doc. Returns `None` — falling back to derivation — when the dir isn't registered or the
+/// registry can't be read.
+fn registered_key(dir: &Path, name: &str) -> Option<String> {
+    let canon = std::fs::canonicalize(dir).ok()?;
+    let reg = registry::Registry::load().ok()?;
+    reg.apps
+        .iter()
+        .find(|(key, entry)| entry.path == canon && registry::base_name(key) == name)
+        .map(|(key, _)| key.clone())
+}
+
+/// Derive the key `client::add` would assign when the dir is not yet registered: a linked
+/// worktree's branch label, else the bare name.
+///
+/// Best-effort: a steering doc must still print when label detection fails (detached HEAD, `git`
+/// not on PATH), so detection errors degrade to the bare name with a stderr note rather than
+/// aborting the command — the agent gets a usable doc and the human can `adj add --label` if the
+/// instance needs its own URL. (`adj add` itself still errors on the same conditions.)
+fn derive_key(dir: &Path, name: &str) -> String {
+    match worktree::detect_label(dir) {
+        Ok(Some(label)) => format!("{label}.{name}"),
+        Ok(None) => name.to_string(),
+        Err(err) => {
+            eprintln!("adj: {err:#}; templating the doc with the bare name `{name}`");
+            name.to_string()
+        }
+    }
 }
 
 fn render(name: &str, cmd: &str) -> String {
