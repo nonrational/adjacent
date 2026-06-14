@@ -145,6 +145,29 @@ ThreadingHTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
     format!("exec /usr/bin/python3 {}", script.display())
 }
 
+/// Write a server that echoes back the X-Forwarded-* request headers it received, one
+/// `name=value` per line. Lets the test assert what actually crossed the proxy boundary.
+async fn write_header_echo_server(dir: &Path) -> String {
+    let py = r#"import os
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        names = ["X-Forwarded-Host", "X-Forwarded-For", "X-Forwarded-Proto"]
+        body = "".join(f"{n}={self.headers.get(n)}\n" for n in names).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a, **kw):
+        pass
+ThreadingHTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
+"#;
+    let script = dir.join("server.py");
+    tokio::fs::write(&script, py).await.expect("write server.py");
+    format!("exec /usr/bin/python3 {}", script.display())
+}
+
 /// Write a minimal WebSocket echo server (handshake + unmask + echo) to `dir/ws.py` and return
 /// the shell command that runs it. Python because the stdlib has everything needed (sha1,
 /// base64, socketserver) — no npm install in the test sandbox. Frames are assumed < 126 bytes
@@ -204,13 +227,27 @@ S(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
 
 /// Send an HTTP GET to the proxy with the given Host header, return (status_line, body).
 fn http_get(proxy_port: u16, host: &str, path: &str) -> Result<(String, String), String> {
+    http_get_with_headers(proxy_port, host, path, &[])
+}
+
+/// Like `http_get` but with extra request headers, e.g. a client-supplied X-Forwarded-For.
+fn http_get_with_headers(
+    proxy_port: u16,
+    host: &str,
+    path: &str,
+    extra_headers: &[(&str, &str)],
+) -> Result<(String, String), String> {
     let mut stream = TcpStream::connect(("127.0.0.1", proxy_port))
         .map_err(|e| format!("connect: {e}"))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(70)))
         .map_err(|e| format!("set_read_timeout: {e}"))?;
+    let extra: String = extra_headers
+        .iter()
+        .map(|(k, v)| format!("{k}: {v}\r\n"))
+        .collect();
     let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\n{extra}Connection: close\r\n\r\n"
     );
     stream.write_all(req.as_bytes()).map_err(|e| format!("write: {e}"))?;
     let mut buf = Vec::new();
@@ -320,6 +357,107 @@ async fn verify_marker_short_circuits_before_boot_gate() {
     sandbox.stop_daemon().await;
 }
 
+/// The proxy rewrites Host to `127.0.0.1:<port>` for upstream allowlists, so X-Forwarded-* is
+/// the only way an app can recover the original request origin (issue #26).
+#[tokio::test]
+async fn proxy_forwards_x_forwarded_headers_to_upstream() {
+    let mut sandbox = Sandbox::new().await;
+    sandbox.start_daemon().await;
+
+    let app_dir = TempDir::new().expect("app dir");
+    let cmd = write_header_echo_server(app_dir.path()).await;
+    write_app(app_dir.path(), "fwd", &cmd).await;
+
+    let add = sandbox
+        .cmd()
+        .arg("add")
+        .arg(app_dir.path())
+        .output()
+        .await
+        .expect("add");
+    assert!(add.status.success(), "add: {:?}", add);
+
+    let proxy_port = sandbox.proxy_port;
+
+    // Clean request: all three headers must be added.
+    let (status_line, body) = tokio::task::spawn_blocking(move || {
+        http_get(proxy_port, "fwd.adj.ac", "/")
+    })
+    .await
+    .expect("join")
+    .expect("http_get");
+    assert!(status_line.contains(" 200 "), "status: {status_line}");
+    assert!(
+        body.contains("X-Forwarded-Host=fwd.adj.ac"),
+        "missing/incorrect X-Forwarded-Host in upstream view: {body}"
+    );
+    assert!(
+        body.contains("X-Forwarded-For=127.0.0.1"),
+        "missing/incorrect X-Forwarded-For in upstream view: {body}"
+    );
+    assert!(
+        body.contains("X-Forwarded-Proto=http"),
+        "missing/incorrect X-Forwarded-Proto in upstream view: {body}"
+    );
+
+    // Client-supplied X-Forwarded-For must be appended to, not overwritten.
+    let (status_line, body) = tokio::task::spawn_blocking(move || {
+        http_get_with_headers(
+            proxy_port,
+            "fwd.adj.ac",
+            "/",
+            &[("X-Forwarded-For", "10.0.0.1")],
+        )
+    })
+    .await
+    .expect("join")
+    .expect("http_get");
+    assert!(status_line.contains(" 200 "), "status: {status_line}");
+    assert!(
+        body.contains("X-Forwarded-For=10.0.0.1, 127.0.0.1"),
+        "existing X-Forwarded-For not appended to: {body}"
+    );
+
+    // The original Host's port must survive into X-Forwarded-Host — in the default no-pfctl setup
+    // the browser sends `Host: fwd.adj.ac:8080`, and an app rebuilds a routable origin from it.
+    let (status_line, body) = tokio::task::spawn_blocking(move || {
+        http_get(proxy_port, "fwd.adj.ac:8080", "/")
+    })
+    .await
+    .expect("join")
+    .expect("http_get");
+    assert!(status_line.contains(" 200 "), "status: {status_line}");
+    assert!(
+        body.contains("X-Forwarded-Host=fwd.adj.ac:8080"),
+        "X-Forwarded-Host dropped the original port: {body}"
+    );
+
+    // A client may legally split X-Forwarded-For across multiple header lines; every entry must
+    // survive the collapse, not just the first.
+    let (status_line, body) = tokio::task::spawn_blocking(move || {
+        http_get_with_headers(
+            proxy_port,
+            "fwd.adj.ac",
+            "/",
+            &[
+                ("X-Forwarded-For", "10.0.0.1"),
+                ("X-Forwarded-For", "192.168.1.1"),
+            ],
+        )
+    })
+    .await
+    .expect("join")
+    .expect("http_get");
+    assert!(status_line.contains(" 200 "), "status: {status_line}");
+    assert!(
+        body.contains("X-Forwarded-For=10.0.0.1, 192.168.1.1, 127.0.0.1"),
+        "multi-line X-Forwarded-For not fully preserved: {body}"
+    );
+
+    let _ = sandbox.cmd().arg("down").arg("fwd").output().await;
+    sandbox.stop_daemon().await;
+}
+
 /// Read exactly `n` bytes from the stream.
 fn read_exact_n(stream: &mut TcpStream, n: usize) -> Result<Vec<u8>, String> {
     let mut buf = vec![0u8; n];
@@ -378,6 +516,7 @@ async fn proxy_propagates_websocket_upgrade_and_pipes_frames() {
     assert!(add.status.success(), "add: {:?}", add);
 
     let proxy_port = sandbox.proxy_port;
+
     tokio::task::spawn_blocking(move || {
         let mut stream =
             TcpStream::connect(("127.0.0.1", proxy_port)).expect("connect proxy");

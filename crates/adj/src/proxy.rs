@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -112,7 +112,7 @@ pub async fn run(supervisor: Arc<Supervisor>) -> Result<()> {
     let gate = Arc::new(BootGate::new());
 
     loop {
-        let (stream, _peer) = match listener.accept().await {
+        let (stream, peer) = match listener.accept().await {
             Ok(pair) => pair,
             Err(err) => {
                 tracing::warn!("proxy accept failed: {err}");
@@ -122,7 +122,7 @@ pub async fn run(supervisor: Arc<Supervisor>) -> Result<()> {
         let sup = supervisor.clone();
         let gate = gate.clone();
         tokio::spawn(async move {
-            serve_plain(stream, sup, gate).await;
+            serve_plain(stream, sup, gate, peer.ip(), "http").await;
         });
     }
 }
@@ -153,7 +153,7 @@ pub async fn run_https(
     let gate = Arc::new(BootGate::new());
 
     loop {
-        let (stream, _peer) = match listener.accept().await {
+        let (stream, peer) = match listener.accept().await {
             Ok(pair) => pair,
             Err(err) => {
                 tracing::warn!("https accept failed: {err}");
@@ -173,7 +173,7 @@ pub async fn run_https(
                     return;
                 }
             };
-            serve_plain(tls_stream, sup, gate).await;
+            serve_plain(tls_stream, sup, gate, peer.ip(), "https").await;
         });
     }
 }
@@ -181,15 +181,20 @@ pub async fn run_https(
 /// Run one HTTP/1.1 connection against the proxy's per-request handler. Parameterized over the
 /// underlying stream so the HTTP and HTTPS listeners share the same serve loop — the difference
 /// between them is purely accept-time framing.
-async fn serve_plain<S>(stream: S, sup: Arc<Supervisor>, gate: Arc<BootGate>)
-where
+async fn serve_plain<S>(
+    stream: S,
+    sup: Arc<Supervisor>,
+    gate: Arc<BootGate>,
+    client_ip: IpAddr,
+    proto: &'static str,
+) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let io = TokioIo::new(stream);
     let service = service_fn(move |req: Request<Incoming>| {
         let sup = sup.clone();
         let gate = gate.clone();
-        async move { Ok::<_, Infallible>(handle(req, sup, gate).await) }
+        async move { Ok::<_, Infallible>(handle(req, sup, gate, client_ip, proto).await) }
     });
     if let Err(err) = server_http1::Builder::new()
         .serve_connection(io, service)
@@ -204,11 +209,17 @@ async fn handle(
     req: Request<Incoming>,
     supervisor: Arc<Supervisor>,
     gate: Arc<BootGate>,
+    client_ip: IpAddr,
+    proto: &'static str,
 ) -> Response<BoxBody<Bytes, hyper::Error>> {
-    let host = match host_from_request(&req) {
+    let raw_host = match raw_host_from_request(&req) {
         Some(h) => h,
         None => return error_response(StatusCode::BAD_REQUEST, "missing or invalid Host header"),
     };
+    // Strip the optional `:port` for routing and reserved-name comparisons. The upstream still
+    // sees the full original Host (port included) via X-Forwarded-Host — apps reconstruct their
+    // origin from it, and in the default no-pfctl setup the browser's Host carries `:8080`.
+    let host = strip_port(&raw_host);
     let name = match name_from_host(&host) {
         Some(n) => n,
         None => {
@@ -266,7 +277,7 @@ async fn handle(
     // for the duration of `idle_timeout` doesn't get spuriously stopped mid-stream.
     supervisor.touch_idle(&name).await;
 
-    match forward(req, upstream_port).await {
+    match forward(req, upstream_port, &raw_host, client_ip, proto).await {
         Ok(resp) => resp,
         Err(err) => {
             tracing::warn!("proxy forward to `{name}:{upstream_port}` failed: {err}");
@@ -363,6 +374,9 @@ pub fn boot_timeout_for(cfg: &AppConfig) -> Duration {
 async fn forward(
     mut req: Request<Incoming>,
     upstream_port: u16,
+    original_host: &str,
+    client_ip: IpAddr,
+    proto: &'static str,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>> {
     // Capture the downstream upgrade handle BEFORE the request is consumed by send_request.
     // hyper stores it as a request extension; taking it here (rather than after the response)
@@ -394,6 +408,11 @@ async fn forward(
             tracing::debug!("upstream connection ended: {err}");
         }
     });
+
+    // Standard reverse-proxy forwarding headers, set BEFORE the Host rewrite below clobbers the
+    // only other record of the original hostname. Apps that generate absolute links or validate
+    // auth callbacks recover the request's true origin from these.
+    set_forwarded_headers(req.headers_mut(), original_host, client_ip, proto);
 
     // Rewrite the Host header to the upstream's loopback address so apps that key on Host (e.g.
     // dev servers with host-allowlist checks) accept the request.
@@ -440,10 +459,46 @@ async fn forward(
     Ok(Response::from_parts(parts, body.boxed()))
 }
 
-fn host_from_request<B>(req: &Request<B>) -> Option<String> {
+/// Set `X-Forwarded-Host` / `X-Forwarded-For` / `X-Forwarded-Proto` on the upstream request.
+/// `X-Forwarded-For` appends to any client-supplied value rather than overwriting — the
+/// rightmost entry is the one this proxy vouches for, per reverse-proxy convention.
+fn set_forwarded_headers(
+    headers: &mut hyper::HeaderMap,
+    original_host: &str,
+    client_ip: IpAddr,
+    proto: &'static str,
+) {
+    if let Ok(v) = hyper::header::HeaderValue::from_str(original_host) {
+        headers.insert("x-forwarded-host", v);
+    }
+    // Preserve the whole X-Forwarded-For chain, then append this hop. A client may legally send
+    // the list as several header lines rather than one comma-joined line; `get_all` captures
+    // every line so none is dropped when `insert` below collapses them to a single line. Reading
+    // only the first line (`get`) would silently lose the rest — worse than overwriting.
+    let mut chain: Vec<String> = headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(str::to_string)
+        .collect();
+    chain.push(client_ip.to_string());
+    let xff = chain.join(", ");
+    if let Ok(v) = hyper::header::HeaderValue::from_str(&xff) {
+        headers.insert("x-forwarded-for", v);
+    }
+    headers.insert(
+        "x-forwarded-proto",
+        hyper::header::HeaderValue::from_static(proto),
+    );
+}
+
+/// The request's Host header verbatim, port included. This is what an upstream needs to
+/// reconstruct the original origin via X-Forwarded-Host; routing strips the port separately
+/// (see `strip_port`), so the two concerns don't share a representation.
+fn raw_host_from_request<B>(req: &Request<B>) -> Option<String> {
     if let Some(h) = req.headers().get(hyper::header::HOST) {
         if let Ok(s) = h.to_str() {
-            return Some(strip_port(s));
+            return Some(s.to_string());
         }
     }
     req.uri().host().map(|s| s.to_string())
@@ -521,6 +576,46 @@ mod tests {
         let map = gate.locks.lock().await;
         assert_eq!(map.len(), 1);
         assert!(map.contains_key("c"));
+    }
+
+    #[test]
+    fn forwarded_headers_set_on_clean_request() {
+        let mut headers = hyper::HeaderMap::new();
+        set_forwarded_headers(&mut headers, "echo.adj.ac", "127.0.0.1".parse().unwrap(), "http");
+        assert_eq!(headers["x-forwarded-host"], "echo.adj.ac");
+        assert_eq!(headers["x-forwarded-for"], "127.0.0.1");
+        assert_eq!(headers["x-forwarded-proto"], "http");
+    }
+
+    #[test]
+    fn forwarded_for_appends_to_existing_value() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert("x-forwarded-for", "10.0.0.1".parse().unwrap());
+        set_forwarded_headers(&mut headers, "echo.adj.ac", "127.0.0.1".parse().unwrap(), "https");
+        assert_eq!(headers["x-forwarded-for"], "10.0.0.1, 127.0.0.1");
+        assert_eq!(headers["x-forwarded-proto"], "https");
+    }
+
+    #[test]
+    fn forwarded_for_preserves_multiple_header_lines() {
+        // A client may send X-Forwarded-For as several lines (legal for a list-typed header).
+        // Every line must survive into the single collapsed value, not just the first.
+        let mut headers = hyper::HeaderMap::new();
+        headers.append("x-forwarded-for", "10.0.0.1".parse().unwrap());
+        headers.append("x-forwarded-for", "192.168.1.1".parse().unwrap());
+        set_forwarded_headers(&mut headers, "echo.adj.ac", "127.0.0.1".parse().unwrap(), "http");
+        assert_eq!(headers["x-forwarded-for"], "10.0.0.1, 192.168.1.1, 127.0.0.1");
+        // The collapse must leave exactly one line behind.
+        assert_eq!(headers.get_all("x-forwarded-for").iter().count(), 1);
+    }
+
+    #[test]
+    fn forwarded_host_preserves_port() {
+        // In the default no-pfctl setup the browser sends `Host: name.adj.ac:8080`; the upstream
+        // must see that port via X-Forwarded-Host to reconstruct a routable origin.
+        let mut headers = hyper::HeaderMap::new();
+        set_forwarded_headers(&mut headers, "echo.adj.ac:8080", "127.0.0.1".parse().unwrap(), "http");
+        assert_eq!(headers["x-forwarded-host"], "echo.adj.ac:8080");
     }
 
     #[test]
