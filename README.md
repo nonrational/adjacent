@@ -32,6 +32,20 @@ Homepage: [adj.ac/ent](https://adj.ac/ent)
 
 In development. See [github.com/nonrational/adjacent/issues](https://github.com/nonrational/adjacent/issues).
 
+## Install (alpha)
+
+Apple Silicon, unsigned alpha build, straight from this repo (no separate tap repo):
+
+```sh
+brew tap nonrational/adjacent https://github.com/nonrational/adjacent
+brew install adj
+```
+
+Then `adj daemon` (or install it as a login service via a launchd LaunchAgent) and `adj add .` in an
+app directory. HTTPS is opt-in via `adj install-ca`; because each `brew upgrade adj` replaces the
+binary, repair the CA afterward with `adj install-ca --reset && adj install-ca`. Building from source
+instead? See [Local Development](#local-development).
+
 ## Usage
 
 Run `adj <command> --help` for flags. Every read command supports `--json`.
