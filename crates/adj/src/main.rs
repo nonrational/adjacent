@@ -18,10 +18,17 @@ mod supervisor;
 mod tls;
 mod worktree;
 
+/// Build-stamped version: `ADJ_VERSION` (the CI tag or `git describe`, set by build.rs) when
+/// present, else the crate version from Cargo.toml.
+const VERSION: &str = match option_env!("ADJ_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 #[derive(Parser)]
 #[command(
     name = "adj",
-    version,
+    version = VERSION,
     about = "Adjacent: supervised local dev servers"
 )]
 struct Cli {
