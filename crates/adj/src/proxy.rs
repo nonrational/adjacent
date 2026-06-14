@@ -317,6 +317,11 @@ async fn forward(
     // hyper stores it as a request extension; taking it here (rather than after the response)
     // is the only window where the server half is still ours to claim. Vite/Webpack/Next HMR
     // all ride on this — without it WebSocket requests die at the proxy boundary.
+    //
+    // Detection is intentionally protocol-agnostic: any request carrying an `Upgrade` header is a
+    // tunnel candidate, and any upstream `101 Switching Protocols` (below) seals it. WebSocket is
+    // the motivating case, but h2c and other custom upgrades pass through unchanged — the right
+    // call for a generic dev proxy, which has no business second-guessing what the app negotiated.
     let downstream_upgrade = req
         .headers()
         .contains_key(hyper::header::UPGRADE)

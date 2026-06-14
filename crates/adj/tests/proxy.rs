@@ -347,7 +347,8 @@ fn ws_echo_roundtrip(stream: &mut TcpStream, msg: &str) -> Result<String, String
 }
 
 /// Issue #25: WebSocket upgrades must propagate through the proxy — handshake completes with a
-/// 101 and frames flow both ways afterwards. This is the path Vite/Webpack/Next HMR rides on.
+/// 101, frames flow both ways afterwards, and a close from one side tears the tunnel down so the
+/// peer sees EOF. This is the path Vite/Webpack/Next HMR rides on.
 #[tokio::test]
 async fn proxy_propagates_websocket_upgrade_and_pipes_frames() {
     let mut sandbox = Sandbox::new().await;
@@ -396,9 +397,23 @@ async fn proxy_propagates_websocket_upgrade_and_pipes_frames() {
             status_line.contains(" 101 "),
             "expected 101 Switching Protocols, got: {status_line}\nfull head:\n{head}"
         );
-        assert!(
-            head.to_ascii_lowercase().contains("sec-websocket-accept:"),
-            "upstream handshake headers must pass through: {head}"
+        // Pin the handshake *value*, not just header presence. The RFC 6455 sample key
+        // `dGhlIHNhbXBsZSBub25jZQ==` derives the well-known accept `s3pPLMBiTxaQ9kYGzzhZRbK+xOo=`;
+        // asserting it proves the proxy relays the header bytes unchanged rather than merely that
+        // some accept header exists. hyper may normalize the header *name* casing, so match the
+        // name case-insensitively but compare the base64 value exactly (it is case-sensitive).
+        let accept = head
+            .lines()
+            .find_map(|l| {
+                let (name, value) = l.split_once(':')?;
+                name.trim()
+                    .eq_ignore_ascii_case("sec-websocket-accept")
+                    .then(|| value.trim())
+            })
+            .unwrap_or_else(|| panic!("no Sec-WebSocket-Accept header in response head:\n{head}"));
+        assert_eq!(
+            accept, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=",
+            "accept value must match the RFC 6455 derivation for the sample key"
         );
 
         // Two round-trips prove the tunnel stays open for continued bidirectional traffic,
@@ -407,6 +422,19 @@ async fn proxy_propagates_websocket_upgrade_and_pipes_frames() {
         assert_eq!(echo1, "ping-1");
         let echo2 = ws_echo_roundtrip(&mut stream, "ping-2").expect("roundtrip 2");
         assert_eq!(echo2, "ping-2");
+
+        // Close half of AC #2 ("until either side closes"): send a masked close frame. The echo
+        // server returns on opcode 8, dropping its connection; copy_bidirectional must propagate
+        // that shutdown so our next read hits EOF rather than hanging to the 70s read timeout.
+        let close = [0x88u8, 0x80, 0x12, 0x34, 0x56, 0x78];
+        stream.write_all(&close).expect("write close frame");
+        let mut tail = [0u8; 1];
+        let n = stream.read(&mut tail).expect("read after close");
+        assert_eq!(
+            n, 0,
+            "expected EOF after the upstream closed, got byte {:#04x}",
+            tail[0]
+        );
     })
     .await
     .expect("join ws client");
