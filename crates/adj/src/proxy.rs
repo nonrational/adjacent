@@ -212,10 +212,14 @@ async fn handle(
     client_ip: IpAddr,
     proto: &'static str,
 ) -> Response<BoxBody<Bytes, hyper::Error>> {
-    let host = match host_from_request(&req) {
+    let raw_host = match raw_host_from_request(&req) {
         Some(h) => h,
         None => return error_response(StatusCode::BAD_REQUEST, "missing or invalid Host header"),
     };
+    // Strip the optional `:port` for routing and reserved-name comparisons. The upstream still
+    // sees the full original Host (port included) via X-Forwarded-Host — apps reconstruct their
+    // origin from it, and in the default no-pfctl setup the browser's Host carries `:8080`.
+    let host = strip_port(&raw_host);
     let name = match name_from_host(&host) {
         Some(n) => n,
         None => {
@@ -273,7 +277,7 @@ async fn handle(
     // for the duration of `idle_timeout` doesn't get spuriously stopped mid-stream.
     supervisor.touch_idle(&name).await;
 
-    match forward(req, upstream_port, &host, client_ip, proto).await {
+    match forward(req, upstream_port, &raw_host, client_ip, proto).await {
         Ok(resp) => resp,
         Err(err) => {
             tracing::warn!("proxy forward to `{name}:{upstream_port}` failed: {err}");
@@ -467,13 +471,18 @@ fn set_forwarded_headers(
     if let Ok(v) = hyper::header::HeaderValue::from_str(original_host) {
         headers.insert("x-forwarded-host", v);
     }
-    let xff = match headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-    {
-        Some(prior) => format!("{prior}, {client_ip}"),
-        None => client_ip.to_string(),
-    };
+    // Preserve the whole X-Forwarded-For chain, then append this hop. A client may legally send
+    // the list as several header lines rather than one comma-joined line; `get_all` captures
+    // every line so none is dropped when `insert` below collapses them to a single line. Reading
+    // only the first line (`get`) would silently lose the rest — worse than overwriting.
+    let mut chain: Vec<String> = headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(str::to_string)
+        .collect();
+    chain.push(client_ip.to_string());
+    let xff = chain.join(", ");
     if let Ok(v) = hyper::header::HeaderValue::from_str(&xff) {
         headers.insert("x-forwarded-for", v);
     }
@@ -483,10 +492,13 @@ fn set_forwarded_headers(
     );
 }
 
-fn host_from_request<B>(req: &Request<B>) -> Option<String> {
+/// The request's Host header verbatim, port included. This is what an upstream needs to
+/// reconstruct the original origin via X-Forwarded-Host; routing strips the port separately
+/// (see `strip_port`), so the two concerns don't share a representation.
+fn raw_host_from_request<B>(req: &Request<B>) -> Option<String> {
     if let Some(h) = req.headers().get(hyper::header::HOST) {
         if let Ok(s) = h.to_str() {
-            return Some(strip_port(s));
+            return Some(s.to_string());
         }
     }
     req.uri().host().map(|s| s.to_string())
@@ -582,6 +594,28 @@ mod tests {
         set_forwarded_headers(&mut headers, "echo.adj.ac", "127.0.0.1".parse().unwrap(), "https");
         assert_eq!(headers["x-forwarded-for"], "10.0.0.1, 127.0.0.1");
         assert_eq!(headers["x-forwarded-proto"], "https");
+    }
+
+    #[test]
+    fn forwarded_for_preserves_multiple_header_lines() {
+        // A client may send X-Forwarded-For as several lines (legal for a list-typed header).
+        // Every line must survive into the single collapsed value, not just the first.
+        let mut headers = hyper::HeaderMap::new();
+        headers.append("x-forwarded-for", "10.0.0.1".parse().unwrap());
+        headers.append("x-forwarded-for", "192.168.1.1".parse().unwrap());
+        set_forwarded_headers(&mut headers, "echo.adj.ac", "127.0.0.1".parse().unwrap(), "http");
+        assert_eq!(headers["x-forwarded-for"], "10.0.0.1, 192.168.1.1, 127.0.0.1");
+        // The collapse must leave exactly one line behind.
+        assert_eq!(headers.get_all("x-forwarded-for").iter().count(), 1);
+    }
+
+    #[test]
+    fn forwarded_host_preserves_port() {
+        // In the default no-pfctl setup the browser sends `Host: name.adj.ac:8080`; the upstream
+        // must see that port via X-Forwarded-Host to reconstruct a routable origin.
+        let mut headers = hyper::HeaderMap::new();
+        set_forwarded_headers(&mut headers, "echo.adj.ac:8080", "127.0.0.1".parse().unwrap(), "http");
+        assert_eq!(headers["x-forwarded-host"], "echo.adj.ac:8080");
     }
 
     #[test]

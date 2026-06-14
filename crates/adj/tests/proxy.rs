@@ -418,6 +418,42 @@ async fn proxy_forwards_x_forwarded_headers_to_upstream() {
         "existing X-Forwarded-For not appended to: {body}"
     );
 
+    // The original Host's port must survive into X-Forwarded-Host — in the default no-pfctl setup
+    // the browser sends `Host: fwd.adj.ac:8080`, and an app rebuilds a routable origin from it.
+    let (status_line, body) = tokio::task::spawn_blocking(move || {
+        http_get(proxy_port, "fwd.adj.ac:8080", "/")
+    })
+    .await
+    .expect("join")
+    .expect("http_get");
+    assert!(status_line.contains(" 200 "), "status: {status_line}");
+    assert!(
+        body.contains("X-Forwarded-Host=fwd.adj.ac:8080"),
+        "X-Forwarded-Host dropped the original port: {body}"
+    );
+
+    // A client may legally split X-Forwarded-For across multiple header lines; every entry must
+    // survive the collapse, not just the first.
+    let (status_line, body) = tokio::task::spawn_blocking(move || {
+        http_get_with_headers(
+            proxy_port,
+            "fwd.adj.ac",
+            "/",
+            &[
+                ("X-Forwarded-For", "10.0.0.1"),
+                ("X-Forwarded-For", "192.168.1.1"),
+            ],
+        )
+    })
+    .await
+    .expect("join")
+    .expect("http_get");
+    assert!(status_line.contains(" 200 "), "status: {status_line}");
+    assert!(
+        body.contains("X-Forwarded-For=10.0.0.1, 192.168.1.1, 127.0.0.1"),
+        "multi-line X-Forwarded-For not fully preserved: {body}"
+    );
+
     let _ = sandbox.cmd().arg("down").arg("fwd").output().await;
     sandbox.stop_daemon().await;
 }
