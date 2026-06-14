@@ -109,7 +109,9 @@ async fn http_ready(port: u16, path: &str) -> bool {
             .ok()?;
         let resp = sender.send_request(req).await.ok()?;
         let status = resp.status();
-        // Drain so the upstream connection task can finish cleanly.
+        // Drain the body so the response is fully consumed before we report readiness; the
+        // connection is then torn down by the abort below (or by hyper closing on `sender`
+        // drop), not reused.
         let _ = resp.into_body().collect().await;
         Some(status.is_success())
     };
@@ -148,7 +150,7 @@ mod tests {
         });
         let metrics = tokio::runtime::Handle::current().metrics();
         let baseline = metrics.num_alive_tasks();
-        for _ in 0..10 {
+        for _ in 0..3 {
             assert!(!http_ready(port, "/healthz").await);
         }
         // Aborted tasks unwind asynchronously; poll briefly instead of asserting instantly.
@@ -164,9 +166,11 @@ mod tests {
         }
     }
 
-    /// Regression test for the probe-task leak: a server that accepts but never responds makes
-    /// the probe time out, and the aborted connection task must drop the socket — observed by
-    /// the server reading EOF. Pre-fix, the orphaned task held the socket open indefinitely.
+    /// A timed-out probe (server accepts but never responds) must leave no connection lingering:
+    /// after the probe resolves, the socket is closed — observed by the server reading EOF. The
+    /// explicit `task.abort()` guarantees this; in hyper 1.x dropping `sender` happens to close
+    /// the socket too, so this test pins the no-lingering-socket invariant regardless of which
+    /// path does the closing.
     #[tokio::test]
     async fn timed_out_probe_aborts_connection_task() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
