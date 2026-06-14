@@ -78,13 +78,36 @@ impl BootGate {
     }
 }
 
+/// Record the listener's actually-bound port under the Adjacent home dir. With the port env
+/// var set to `0` the kernel assigns the port at bind time, and this file is the only way for
+/// another process to learn it. The integration-test sandboxes depend on that: the previous
+/// scheme — bind `:0` in the test, close, hand the freed port to the daemon — raced every
+/// other process drawing from the same ephemeral range, and a lost race surfaced as
+/// "connection reset by peer" when a readiness probe hit a foreign listener. Best-effort:
+/// a failed write degrades discovery, not serving.
+fn report_bound_port(path: Result<std::path::PathBuf>, port: u16) {
+    match path {
+        Ok(path) => {
+            if let Err(err) = std::fs::write(&path, format!("{port}\n")) {
+                tracing::warn!("recording bound port at {}: {err}", path.display());
+            }
+        }
+        Err(err) => tracing::warn!("resolving port-file path: {err}"),
+    }
+}
+
 pub async fn run(supervisor: Arc<Supervisor>) -> Result<()> {
     let port = proxy_port();
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|e| anyhow!("binding proxy listener at {addr}: {e}"))?;
-    tracing::info!("adj proxy listening at http://{addr}");
+    let bound = listener
+        .local_addr()
+        .map_err(|e| anyhow!("reading proxy listener addr: {e}"))?
+        .port();
+    report_bound_port(crate::paths::proxy_port_path(), bound);
+    tracing::info!("adj proxy listening at http://127.0.0.1:{bound}");
 
     let gate = Arc::new(BootGate::new());
 
@@ -120,7 +143,12 @@ pub async fn run_https(
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|e| anyhow!("binding https listener at {addr}: {e}"))?;
-    tracing::info!("adj https proxy listening at https://{addr}");
+    let bound = listener
+        .local_addr()
+        .map_err(|e| anyhow!("reading https listener addr: {e}"))?
+        .port();
+    report_bound_port(crate::paths::https_port_path(), bound);
+    tracing::info!("adj https proxy listening at https://127.0.0.1:{bound}");
 
     let gate = Arc::new(BootGate::new());
 
@@ -336,6 +364,20 @@ async fn forward(
     mut req: Request<Incoming>,
     upstream_port: u16,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>> {
+    // Capture the downstream upgrade handle BEFORE the request is consumed by send_request.
+    // hyper stores it as a request extension; taking it here (rather than after the response)
+    // is the only window where the server half is still ours to claim. Vite/Webpack/Next HMR
+    // all ride on this — without it WebSocket requests die at the proxy boundary.
+    //
+    // Detection is intentionally protocol-agnostic: any request carrying an `Upgrade` header is a
+    // tunnel candidate, and any upstream `101 Switching Protocols` (below) seals it. WebSocket is
+    // the motivating case, but h2c and other custom upgrades pass through unchanged — the right
+    // call for a generic dev proxy, which has no business second-guessing what the app negotiated.
+    let downstream_upgrade = req
+        .headers()
+        .contains_key(hyper::header::UPGRADE)
+        .then(|| hyper::upgrade::on(&mut req));
+
     let upstream_addr = SocketAddr::from(([127, 0, 0, 1], upstream_port));
     let stream = TcpStream::connect(upstream_addr)
         .await
@@ -345,7 +387,10 @@ async fn forward(
         .await
         .map_err(|e| anyhow!("upstream handshake: {e}"))?;
     tokio::spawn(async move {
-        if let Err(err) = conn.await {
+        // with_upgrades keeps the client connection alive past a 101 so the upstream half of
+        // the upgrade can be claimed from the response; for plain requests it behaves like
+        // a normal drive-to-completion.
+        if let Err(err) = conn.with_upgrades().await {
             tracing::debug!("upstream connection ended: {err}");
         }
     });
@@ -358,10 +403,39 @@ async fn forward(
         upstream_host.parse().expect("loopback host header valid"),
     );
 
-    let resp = sender
+    let mut resp = sender
         .send_request(req)
         .await
         .map_err(|e| anyhow!("sending upstream request: {e}"))?;
+
+    // Upstream accepted the upgrade: pipe raw bytes both ways once hyper releases both halves.
+    // The 101 response returned below is what triggers hyper's server side to complete the
+    // downstream upgrade, so the join must happen in a detached task — awaiting it here would
+    // deadlock (downstream never upgrades until we return).
+    if resp.status() == StatusCode::SWITCHING_PROTOCOLS {
+        if let Some(downstream) = downstream_upgrade {
+            let upstream = hyper::upgrade::on(&mut resp);
+            tokio::spawn(async move {
+                let (down, up) = match tokio::join!(downstream, upstream) {
+                    (Ok(d), Ok(u)) => (d, u),
+                    (d, u) => {
+                        tracing::debug!(
+                            "upgrade completion failed (downstream: {:?}, upstream: {:?})",
+                            d.err(),
+                            u.err()
+                        );
+                        return;
+                    }
+                };
+                let mut down = TokioIo::new(down);
+                let mut up = TokioIo::new(up);
+                if let Err(err) = tokio::io::copy_bidirectional(&mut down, &mut up).await {
+                    tracing::debug!("upgraded tunnel closed: {err}");
+                }
+            });
+        }
+    }
+
     let (parts, body) = resp.into_parts();
     Ok(Response::from_parts(parts, body.boxed()))
 }
