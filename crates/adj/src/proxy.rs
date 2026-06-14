@@ -78,13 +78,36 @@ impl BootGate {
     }
 }
 
+/// Record the listener's actually-bound port under the Adjacent home dir. With the port env
+/// var set to `0` the kernel assigns the port at bind time, and this file is the only way for
+/// another process to learn it. The integration-test sandboxes depend on that: the previous
+/// scheme — bind `:0` in the test, close, hand the freed port to the daemon — raced every
+/// other process drawing from the same ephemeral range, and a lost race surfaced as
+/// "connection reset by peer" when a readiness probe hit a foreign listener. Best-effort:
+/// a failed write degrades discovery, not serving.
+fn report_bound_port(path: Result<std::path::PathBuf>, port: u16) {
+    match path {
+        Ok(path) => {
+            if let Err(err) = std::fs::write(&path, format!("{port}\n")) {
+                tracing::warn!("recording bound port at {}: {err}", path.display());
+            }
+        }
+        Err(err) => tracing::warn!("resolving port-file path: {err}"),
+    }
+}
+
 pub async fn run(supervisor: Arc<Supervisor>) -> Result<()> {
     let port = proxy_port();
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|e| anyhow!("binding proxy listener at {addr}: {e}"))?;
-    tracing::info!("adj proxy listening at http://{addr}");
+    let bound = listener
+        .local_addr()
+        .map_err(|e| anyhow!("reading proxy listener addr: {e}"))?
+        .port();
+    report_bound_port(crate::paths::proxy_port_path(), bound);
+    tracing::info!("adj proxy listening at http://127.0.0.1:{bound}");
 
     let gate = Arc::new(BootGate::new());
 
@@ -120,7 +143,12 @@ pub async fn run_https(
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|e| anyhow!("binding https listener at {addr}: {e}"))?;
-    tracing::info!("adj https proxy listening at https://{addr}");
+    let bound = listener
+        .local_addr()
+        .map_err(|e| anyhow!("reading https listener addr: {e}"))?
+        .port();
+    report_bound_port(crate::paths::https_port_path(), bound);
+    tracing::info!("adj https proxy listening at https://127.0.0.1:{bound}");
 
     let gate = Arc::new(BootGate::new());
 

@@ -37,7 +37,7 @@ Workspace, two crates:
 
 One process hosts three concurrent tasks:
 1. **Control-plane listener** on `~/.adjacent/sock` (Unix). Accepts one JSON request per connection, dispatches via `dispatch()`, writes one JSON response. Each request is line-delimited JSON.
-2. **Reverse proxy** (`proxy.rs`) on `127.0.0.1:8080` (override with `ADJACENT_PROXY_PORT`). Routes by `Host: <name>.adj.ac`. On first request, lazy-boots the app via a per-name `BootGate` (single-flight: concurrent waiters serialize on the same mutex; the first one boots, the rest find `Running` on re-check). Crash during boot surfaces as `502`; timeout as `504`.
+2. **Reverse proxy** (`proxy.rs`) on `127.0.0.1:8080` (override with `ADJACENT_PROXY_PORT`; `0` = kernel-assigned, with the bound port written to `~/.adjacent/proxy.port` — `https.port` for the HTTPS listener — which is how the test sandboxes discover their daemon's ports race-free). Routes by `Host: <name>.adj.ac`. On first request, lazy-boots the app via a per-name `BootGate` (single-flight: concurrent waiters serialize on the same mutex; the first one boots, the rest find `Running` on re-check). Crash during boot surfaces as `502`; timeout as `504`.
 3. **Idle scanner** sweeps every 500ms. Apps whose `last_request` is older than their `idle_timeout` get SIGTERM'd via `down_if_idle`, which re-checks the timestamp **under the supervisor lock** to close the request-vs-scanner race (without that re-check, a request landing between snapshot and SIGTERM turns into a spurious 502).
 
 ### Supervisor (`supervisor.rs`)
