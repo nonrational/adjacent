@@ -16,11 +16,19 @@ mod registry;
 mod status;
 mod supervisor;
 mod tls;
+mod worktree;
+
+/// Build-stamped version: `ADJ_VERSION` (the CI tag or `git describe`, set by build.rs) when
+/// present, else the crate version from Cargo.toml.
+const VERSION: &str = match option_env!("ADJ_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
 
 #[derive(Parser)]
 #[command(
     name = "adj",
-    version,
+    version = VERSION,
     about = "Adjacent: supervised local dev servers"
 )]
 struct Cli {
@@ -33,10 +41,16 @@ enum Cmd {
     /// Run the Adjacent daemon in the foreground.
     Daemon,
     /// Register an app from a directory containing adjacent.toml.
-    Add { path: String },
+    Add {
+        path: String,
+        /// Register as a named instance: `<label>.<name>.adj.ac`. Defaults to the sanitized
+        /// git branch name when the directory is a linked git worktree.
+        #[arg(long)]
+        label: Option<String>,
+    },
     /// List registered apps and their state.
     List {
-        /// Emit a JSON array of `{name, path, state, port?}` instead of the human view.
+        /// Emit a JSON array of `{name, path, state, port?, stale?}` instead of the human view.
         #[arg(long)]
         json: bool,
     },
@@ -46,6 +60,10 @@ enum Cmd {
     Down { name: String },
     /// Restart an app (down then up).
     Restart { name: String },
+    /// Remove an app from the registry (stopping it first if running).
+    Remove { name: String },
+    /// Remove every registry entry whose directory no longer exists on disk.
+    Prune,
     /// Report the current state of an app.
     Status {
         name: String,
@@ -100,11 +118,13 @@ async fn main() -> ExitCode {
 
     let result = match cli.cmd {
         Cmd::Daemon => daemon::run().await,
-        Cmd::Add { path } => client::add(path).await,
+        Cmd::Add { path, label } => client::add(path, label).await,
         Cmd::List { json } => client::list(json).await,
         Cmd::Up { name } => client::up(name).await,
         Cmd::Down { name } => client::down(name).await,
         Cmd::Restart { name } => client::restart(name).await,
+        Cmd::Remove { name } => client::remove(name).await,
+        Cmd::Prune => client::prune().await,
         Cmd::Status { name, json } => client::status(name, json).await,
         Cmd::Logs { name, tail, json } => client::logs(name, tail, json).await,
         Cmd::WaitReady { name, timeout } => client::wait_ready(name, timeout).await,

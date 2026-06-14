@@ -13,6 +13,7 @@ use crate::proxy;
 use crate::readiness::{wait_ready as readiness_wait, ReadinessError};
 use crate::registry::{self, Registry};
 use crate::supervisor::Supervisor;
+use crate::tls;
 
 /// How often the idle scanner looks at the supervised apps to decide whether any should be
 /// stopped. The poll cost is tiny (one mutex lock per pass) so a short interval keeps the
@@ -64,15 +65,35 @@ pub async fn run() -> Result<()> {
         }
     });
 
-    // HTTPS listener is best-effort: the user might not have run `adj install-ca` yet, the CA
-    // files might be unreadable, or the high port might be taken. Any of those degrade the
-    // daemon to HTTP-only rather than killing it — same posture as the HTTP proxy task above.
-    let https_supervisor = supervisor.clone();
-    tokio::spawn(async move {
-        if let Err(err) = proxy::run_https(https_supervisor).await {
-            tracing::error!("https listener exited: {err}");
-        }
-    });
+    // HTTPS listener and SAN re-issue share one resolver, published through a OnceLock the
+    // dispatch path reads. The resolver is built *inside* the spawned task because
+    // `LeafResolver::new()` hits the keychain, and keychain access can stall on a macOS
+    // "allow access" prompt (unsigned cargo-built binary — the hash changes every rebuild).
+    // Built synchronously here, a stalled prompt would hang the control socket and proxy too;
+    // built in the task, only HTTPS waits. Construction failure means "HTTPS not opted in"
+    // (no CA): skip the listener, and registry changes skip the leaf re-issue.
+    //
+    // Accepted race: an `add` landing between `LeafResolver::new()`'s registry read and the
+    // `set` below finds the cell empty and skips its reload, so the leaf stays stale until
+    // the next registry change. The window is one keychain roundtrip wide and self-corrects —
+    // not worth serializing daemon startup against the dispatch path.
+    let resolver: Arc<std::sync::OnceLock<Arc<tls::LeafResolver>>> =
+        Arc::new(std::sync::OnceLock::new());
+    {
+        let cell = resolver.clone();
+        let https_supervisor = supervisor.clone();
+        tokio::spawn(async move {
+            match tls::LeafResolver::new() {
+                Ok(r) => {
+                    let _ = cell.set(r.clone());
+                    if let Err(err) = proxy::run_https(https_supervisor, r).await {
+                        tracing::error!("https listener exited: {err}");
+                    }
+                }
+                Err(err) => tracing::error!("https listener disabled: {err}"),
+            }
+        });
+    }
 
     // Idle scanner: periodically stop apps whose last-routed-request is older than their
     // configured idle_timeout. Chose a scan loop over per-app timers — no per-app timer state
@@ -92,8 +113,9 @@ pub async fn run() -> Result<()> {
         };
         let sup = supervisor.clone();
         let reg_lock = registry_lock.clone();
+        let resolver = resolver.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle_client(stream, sup, reg_lock).await {
+            if let Err(err) = handle_client(stream, sup, reg_lock, resolver).await {
                 tracing::warn!("client handler error: {err}");
             }
         });
@@ -122,6 +144,7 @@ async fn handle_client(
     stream: UnixStream,
     supervisor: Arc<Supervisor>,
     registry_lock: Arc<Mutex<()>>,
+    resolver: Arc<std::sync::OnceLock<Arc<tls::LeafResolver>>>,
 ) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -141,7 +164,7 @@ async fn handle_client(
         }
     };
 
-    let response = match dispatch(req, supervisor, registry_lock).await {
+    let response = match dispatch(req, supervisor, registry_lock, resolver).await {
         Ok(r) => r,
         Err(err) => Response::Error {
             message: format!("{err}"),
@@ -166,10 +189,11 @@ async fn dispatch(
     req: Request,
     supervisor: Arc<Supervisor>,
     registry_lock: Arc<Mutex<()>>,
+    resolver: Arc<std::sync::OnceLock<Arc<tls::LeafResolver>>>,
 ) -> Result<Response> {
     match req {
         Request::Ping => Ok(Response::Ok),
-        Request::Add { path } => add(path, registry_lock).await,
+        Request::Add { path, label } => add(path, label, registry_lock, resolver).await,
         Request::List => list(supervisor).await,
         Request::Up { name } => up(name, supervisor).await,
         Request::Down { name } => down(name, supervisor).await,
@@ -177,6 +201,8 @@ async fn dispatch(
         Request::Status { name } => status(name, supervisor).await,
         Request::LogPath { name } => log_path(name).await,
         Request::WaitReady { name, timeout_secs } => wait_ready(name, timeout_secs, supervisor).await,
+        Request::Remove { name } => remove(name, supervisor, registry_lock, resolver).await,
+        Request::Prune => prune(supervisor, registry_lock, resolver).await,
     }
 }
 
@@ -231,7 +257,36 @@ async fn idle_scanner(supervisor: Arc<Supervisor>) {
     loop {
         tokio::time::sleep(IDLE_SCAN_INTERVAL).await;
         let candidates = supervisor.idle_candidates().await;
+        if candidates.is_empty() {
+            continue;
+        }
+        // Load the registry once per sweep to spot deregistered-but-running apps. A `remove`/
+        // `prune` racing the proxy's lock-free lazy boot (or a `down` that missed its grace
+        // window) can leave a Running runtime entry with no registry row. Such an app is
+        // unreachable — the proxy 404s an unregistered host — and, if its idle_timeout is `"off"`,
+        // the window check below never fires, so without this it would leak forever. Reaping it
+        // here is the backstop `forget`/`remove`/`prune` document. A load error must NOT be read
+        // as "nothing is registered" (that would reap every running app), so we only reap when
+        // the load succeeds.
+        let registered = Registry::load().map(|reg| {
+            reg.apps
+                .into_keys()
+                .collect::<std::collections::HashSet<String>>()
+        });
+        if let Err(err) = &registered {
+            tracing::warn!("idle scanner could not load registry: {err}");
+        }
         for (name, idle_for, idle_timeout) in candidates {
+            if let Ok(registered) = &registered {
+                if !registered.contains(&name) {
+                    tracing::info!("reaping deregistered-but-running `{name}`");
+                    if let Err(err) = supervisor.down(&name).await {
+                        tracing::warn!("reaping deregistered `{name}` failed: {err}");
+                    }
+                    supervisor.forget(&name).await;
+                    continue;
+                }
+            }
             let Some(window) = idle_timeout else {
                 continue;
             };
@@ -262,7 +317,12 @@ async fn idle_scanner(supervisor: Arc<Supervisor>) {
 /// error story coherent — registering it would never actually take effect).
 const RESERVED_NAMES: &[&str] = &["status", "__adj_verify__"];
 
-async fn add(path: String, registry_lock: Arc<Mutex<()>>) -> Result<Response> {
+async fn add(
+    path: String,
+    label: Option<String>,
+    registry_lock: Arc<Mutex<()>>,
+    resolver: Arc<std::sync::OnceLock<Arc<tls::LeafResolver>>>,
+) -> Result<Response> {
     // The client canonicalizes against the user's CWD before sending. We require absolute
     // paths here so we never silently resolve against the daemon's CWD.
     let candidate = PathBuf::from(&path);
@@ -281,23 +341,57 @@ async fn add(path: String, registry_lock: Arc<Mutex<()>>) -> Result<Response> {
             cfg.name
         ));
     }
+    // The client derives labels (from `--label` or the git branch), but the daemon owns
+    // validation: the label becomes a DNS label in `<label>.<name>.adj.ac` and a path
+    // component of the log file, so the charset is restricted at the trust boundary.
+    let key = match &label {
+        Some(label) => {
+            validate_label(label)?;
+            if RESERVED_NAMES.contains(&label.as_str()) {
+                return Err(anyhow!("`{label}` is a reserved name — pick another label"));
+            }
+            format!("{label}.{}", cfg.name)
+        }
+        None => cfg.name.clone(),
+    };
     // Serialize add operations so two concurrent calls can't both pass uniqueness and race on save.
     let _guard = registry_lock.lock().await;
     let mut reg = Registry::load()?;
-    if reg.get(&cfg.name).is_some() {
-        return Err(anyhow!("an app named `{}` is already registered", cfg.name));
+    if reg.get(&key).is_some() {
+        return Err(if label.is_some() {
+            anyhow!("an app named `{key}` is already registered — use a different `--label`")
+        } else {
+            anyhow!(
+                "an app named `{key}` is already registered (use `--label` to register another instance)"
+            )
+        });
     }
     reg.insert(
-        cfg.name.clone(),
+        key.clone(),
         registry::AppEntry {
             path: canon.clone(),
         },
     );
     reg.save()?;
+    // Best-effort: a failed re-issue means HTTPS serves the previous SAN set until the next
+    // registry change; the registry mutation itself already succeeded.
+    if let Some(r) = resolver.get() {
+        if let Err(err) = r.reload() {
+            tracing::warn!("leaf cert re-issue after registry change failed: {err}");
+        }
+    }
     Ok(Response::Added {
-        name: cfg.name,
+        name: key,
         path: canon.display().to_string(),
     })
+}
+
+fn validate_label(label: &str) -> Result<()> {
+    // A worktree label has the same DNS-label constraints as an app name (both become labels in
+    // `<label>.<name>.adj.ac` and SANs in the TLS leaf). `sanitize_label` on the client side
+    // trims and truncates, so this only rejects hand-supplied `--label` values that violate the
+    // constraints directly.
+    registry::validate_dns_label("label", label)
 }
 
 async fn list(supervisor: Arc<Supervisor>) -> Result<Response> {
@@ -309,6 +403,7 @@ async fn list(supervisor: Arc<Supervisor>) -> Result<Response> {
             name: name.clone(),
             path: entry.path.display().to_string(),
             state,
+            stale: !entry.path.exists(),
         });
     }
     Ok(Response::List { entries })
@@ -320,16 +415,26 @@ async fn up(name: String, supervisor: Arc<Supervisor>) -> Result<Response> {
         .get(&name)
         .ok_or_else(|| anyhow!("no app named `{}`", name))?
         .clone();
-    let cfg = registry::read_app_config(&entry.path)?;
-    if cfg.name != name {
+    // Give the same curated error the proxy gives rather than letting read_app_config emit a
+    // confusing "no adjacent.toml found" when the worktree or folder has been deleted.
+    if !entry.path.exists() {
         return Err(anyhow!(
-            "adjacent.toml at {} declares name `{}`, not `{}`",
+            "registered path {} no longer exists — run `adj prune`",
+            entry.path.display()
+        ));
+    }
+    let cfg = registry::read_app_config(&entry.path)?;
+    // An instance key is `<label>.<cfg.name>`; only the base must match the manifest. A full
+    // equality check here would refuse to boot every registered worktree instance.
+    if registry::base_name(&name) != cfg.name {
+        return Err(anyhow!(
+            "adjacent.toml at {} declares name `{}`, which does not match `{}`",
             entry.path.display(),
             cfg.name,
             name
         ));
     }
-    supervisor.up(entry.path, cfg).await?;
+    supervisor.up(&name, entry.path, cfg).await?;
     Ok(Response::Ok)
 }
 
@@ -348,8 +453,26 @@ async fn restart(name: String, supervisor: Arc<Supervisor>) -> Result<Response> 
         .get(&name)
         .ok_or_else(|| anyhow!("no app named `{}`", name))?
         .clone();
+    // Give the same curated error the proxy gives rather than letting read_app_config emit a
+    // confusing "no adjacent.toml found" when the worktree or folder has been deleted.
+    if !entry.path.exists() {
+        return Err(anyhow!(
+            "registered path {} no longer exists — run `adj prune`",
+            entry.path.display()
+        ));
+    }
     let cfg = registry::read_app_config(&entry.path)?;
-    supervisor.up(entry.path, cfg).await?;
+    // An instance key is `<label>.<cfg.name>`; only the base must match the manifest. A full
+    // equality check here would refuse to restart every registered worktree instance.
+    if registry::base_name(&name) != cfg.name {
+        return Err(anyhow!(
+            "adjacent.toml at {} declares name `{}`, which does not match `{}`",
+            entry.path.display(),
+            cfg.name,
+            name
+        ));
+    }
+    supervisor.up(&name, entry.path, cfg).await?;
     Ok(Response::Ok)
 }
 
@@ -371,4 +494,97 @@ async fn log_path(name: String) -> Result<Response> {
     Ok(Response::LogPath {
         path: path.display().to_string(),
     })
+}
+
+async fn remove(
+    name: String,
+    supervisor: Arc<Supervisor>,
+    registry_lock: Arc<Mutex<()>>,
+    resolver: Arc<std::sync::OnceLock<Arc<tls::LeafResolver>>>,
+) -> Result<Response> {
+    let _guard = registry_lock.lock().await;
+    let mut reg = Registry::load()?;
+    if reg.get(&name).is_none() {
+        return Err(anyhow!("no app named `{}`", name));
+    }
+    // Stop before deregistering so removal can't leave an orphan process running against an
+    // entry that no longer exists. Best-effort: a process that ignores SIGTERM+SIGKILL past the
+    // grace window shouldn't abort deregistration and strand the registry entry too — the idle
+    // scanner reaps any still-running deregistered app on its next sweep (see `idle_scanner`).
+    if matches!(
+        supervisor.state(&name).await,
+        adj_protocol::AppState::Running { .. }
+    ) {
+        if let Err(err) = supervisor.down(&name).await {
+            tracing::warn!("stopping `{name}` during remove failed: {err}");
+        }
+    }
+    // Clear the supervisor's AppRuntime so a subsequent `adj add` + boot sees a clean Stopped
+    // slate rather than the last run's state (e.g. Crashed from a previous life of the app).
+    //
+    // Known race: the proxy's `ensure_running` reads the registry *without* the registry lock,
+    // so a request racing `remove` can lazy-boot the app back between our `down` and the
+    // `reg.save()` below. `forget` refuses to drop a Running entry for exactly this reason — and
+    // once `reg.save()` drops the registry row, the idle scanner reaps that now-unregistered
+    // Running app on its next sweep regardless of its idle_timeout (`"off"` included). `adj down
+    // <name>` also still works because `down` operates on supervisor state, not the registry.
+    supervisor.forget(&name).await;
+    reg.remove(&name);
+    reg.save()?;
+    // Best-effort: a failed re-issue means HTTPS serves the previous SAN set until the next
+    // registry change; the registry mutation itself already succeeded.
+    if let Some(r) = resolver.get() {
+        if let Err(err) = r.reload() {
+            tracing::warn!("leaf cert re-issue after registry change failed: {err}");
+        }
+    }
+    Ok(Response::Removed { name })
+}
+
+async fn prune(
+    supervisor: Arc<Supervisor>,
+    registry_lock: Arc<Mutex<()>>,
+    resolver: Arc<std::sync::OnceLock<Arc<tls::LeafResolver>>>,
+) -> Result<Response> {
+    let _guard = registry_lock.lock().await;
+    let mut reg = Registry::load()?;
+    // Only prune entries we can positively confirm are gone. `try_exists()` distinguishes
+    // "definitely absent" (Ok(false)) from "can't tell" (Err: unmounted network volume, EACCES
+    // on a parent dir, broken symlink) — bare `exists()` collapses both to false and would
+    // silently deregister a still-valid app whose path is merely transiently unreachable.
+    let stale: Vec<String> = reg
+        .apps
+        .iter()
+        .filter(|(_, entry)| matches!(entry.path.try_exists(), Ok(false)))
+        .map(|(name, _)| name.clone())
+        .collect();
+    for name in &stale {
+        // A process can outlive its deleted cwd on unix, so a stale entry may still be
+        // running. Best-effort stop — a failure shouldn't block deregistering the corpse.
+        if matches!(
+            supervisor.state(name).await,
+            adj_protocol::AppState::Running { .. }
+        ) {
+            if let Err(err) = supervisor.down(name).await {
+                tracing::warn!("stopping stale `{name}` during prune failed: {err}");
+            }
+        }
+        // Same ghost-state cleanup as remove: drop the AppRuntime so re-adding the same path
+        // later doesn't inherit the old run's state. The same resurrection race documented on
+        // `remove` applies here; the idle scanner reaps any still-running deregistered app on
+        // its next sweep regardless of idle_timeout.
+        supervisor.forget(name).await;
+        reg.remove(name);
+    }
+    if !stale.is_empty() {
+        reg.save()?;
+        // Best-effort: a failed re-issue means HTTPS serves the previous SAN set until the next
+        // registry change; the registry mutation itself already succeeded.
+        if let Some(r) = resolver.get() {
+            if let Err(err) = r.reload() {
+                tracing::warn!("leaf cert re-issue after registry change failed: {err}");
+            }
+        }
+    }
+    Ok(Response::Pruned { removed: stale })
 }

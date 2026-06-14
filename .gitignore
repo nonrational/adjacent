@@ -3,6 +3,9 @@ target/
 Cargo.lock.bak
 **/*.rs.bk
 
+# Release artifact produced by the release workflow / local packaging
+/adj-*.tar.gz
+
 # macOS
 .DS_Store
 

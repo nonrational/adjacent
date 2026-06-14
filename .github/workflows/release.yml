@@ -1,0 +1,67 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the GitHub Release and push the formula bump to main
+
+jobs:
+  release:
+    runs-on: macos-14 # Apple Silicon (arm64)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92.0"
+
+      - name: Cache cargo registry and target dir
+        uses: Swatinem/rust-cache@v2
+
+      - name: Derive version from tag
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release binary
+        env:
+          ADJ_VERSION: ${{ steps.ver.outputs.version }}
+        run: cargo build --release -p adj --locked
+
+      - name: Package tarball
+        id: pkg
+        run: |
+          version="${{ steps.ver.outputs.version }}"
+          tarball="adj-${version}-aarch64-apple-darwin.tar.gz"
+          tar -C target/release -czf "$tarball" adj
+          sha256=$(shasum -a 256 "$tarball" | awk '{print $1}')
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Create prerelease and upload asset
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: ${{ steps.pkg.outputs.tarball }}
+          tag: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          prerelease: true
+          allowUpdates: true
+
+      - name: Render and commit formula to main
+        env:
+          GIT_AUTHOR_NAME: "github-actions[bot]"
+          GIT_AUTHOR_EMAIL: "41898282+github-actions[bot]@users.noreply.github.com"
+          GIT_COMMITTER_NAME: "github-actions[bot]"
+          GIT_COMMITTER_EMAIL: "41898282+github-actions[bot]@users.noreply.github.com"
+        run: |
+          version="${{ steps.ver.outputs.version }}"
+          sha256="${{ steps.pkg.outputs.sha256 }}"
+          git fetch origin main
+          git checkout -B main origin/main
+          bash .github/scripts/render-formula.sh "$version" "$sha256" "$GITHUB_REPOSITORY" > Formula/adj.rb
+          git add Formula/adj.rb
+          git commit -m "Update Homebrew formula for ${GITHUB_REF_NAME}" || { echo "formula unchanged"; exit 0; }
+          git push origin main
