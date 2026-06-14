@@ -33,6 +33,7 @@ fn read_port_file(path: &Path) -> Option<u16> {
     s.trim().parse().ok()
 }
 
+#[cfg(target_os = "macos")]
 fn curl_available() -> bool {
     std::process::Command::new("which")
         .arg("curl")
@@ -77,6 +78,7 @@ impl TlsSandbox {
         c
     }
 
+    #[cfg(target_os = "macos")]
     async fn install_ca(&self) {
         let out = self
             .cmd()
@@ -102,6 +104,7 @@ impl TlsSandbox {
         );
     }
 
+    #[cfg(target_os = "macos")]
     async fn start_daemon(&mut self) {
         let mut c = self.cmd();
         c.arg("daemon");
@@ -234,6 +237,9 @@ ThreadingHTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
+// The keychain guard intentionally spans the test's awaits to serialize on LOGIN_KEYCHAIN_LOCK;
+// a current-thread tokio runtime can't deadlock on it, so the std-guard-across-await lint is moot.
+#[allow(clippy::await_holding_lock)]
 async fn install_ca_generates_files_and_prints_macos_command() {
     let _guard = lock_login_keychain();
     let sandbox = TlsSandbox::new().await;
@@ -284,6 +290,8 @@ async fn install_port_forward_emits_both_http_and_https_rules() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
+// See install_ca test: keychain guard deliberately held across awaits, single-threaded runtime.
+#[allow(clippy::await_holding_lock)]
 async fn https_proxy_forwards_request_through_tls_termination() {
     if !curl_available() {
         eprintln!("curl not on PATH — skipping TLS forward test");
@@ -411,6 +419,8 @@ async fn https_listener_is_best_effort_when_ca_missing() {
 /// exits with status 2 — the "doctor ran and found problems" sentinel.
 #[cfg(target_os = "macos")]
 #[tokio::test]
+// See install_ca test: keychain guard deliberately held across awaits, single-threaded runtime.
+#[allow(clippy::await_holding_lock)]
 async fn doctor_reports_pass_for_marker_and_ca_under_sandbox() {
     let _guard = lock_login_keychain();
     let mut sandbox = TlsSandbox::new().await;

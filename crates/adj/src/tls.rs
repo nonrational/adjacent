@@ -20,6 +20,8 @@ use crate::registry::{self, Registry};
 mod keychain;
 
 pub(crate) use keychain::delete as delete_keychain_ca;
+// Only the macOS doctor checks load a keychain handle; on other targets the re-export is unused.
+#[cfg(target_os = "macos")]
 pub(crate) use keychain::load as load_keychain_ca;
 
 /// Tear down the local CA: remove the Keychain-resident key and any cached on-disk files.
@@ -175,7 +177,7 @@ impl LeafResolver {
     }
 
     /// DER of the leaf currently served to clients, for tests pinning hot-swap behavior.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     fn current_cert_der(&self) -> Vec<u8> {
         self.state.read().expect("leaf state lock").key.cert[0]
             .as_ref()
@@ -220,15 +222,13 @@ fn ensure_leaf(sans: &[String]) -> Result<(String, String)> {
         // A corrupt cached leaf should heal via re-issue, not wedge HTTPS forever. Read errors
         // (non-UTF-8 bytes, permissions) fall through to issue_leaf just like parse errors —
         // only a readable, parseable cert that already covers the desired SANs short-circuits.
-        match (
+        if let (Ok(cert), Ok(key)) = (
             fs::read_to_string(&cert_path),
             fs::read_to_string(&key_path),
         ) {
-            (Ok(cert), Ok(key)) => match leaf_covers(&cert, sans) {
-                Ok(true) => return Ok((cert, key)),
-                Ok(false) | Err(_) => {}
-            },
-            _ => {}
+            if let Ok(true) = leaf_covers(&cert, sans) {
+                return Ok((cert, key));
+            }
         }
     }
     issue_leaf(sans)
@@ -379,15 +379,20 @@ fn write_private_pem(path: &Path, contents: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the macOS keychain tests use the temp-home harness below.
+    #[cfg(target_os = "macos")]
     use std::sync::Mutex;
+    #[cfg(target_os = "macos")]
     use tempfile::TempDir;
 
     // `ADJACENT_HOME` is a process-global env var; cargo runs unit tests in parallel by default,
     // so two tests racing on set/remove will leak state across each other (the symptom is a
     // tempdir going out of scope while another test still expects it to exist). Serialize the
     // whole `with_temp_home` block to keep each test deterministic.
+    #[cfg(target_os = "macos")]
     static HOME_LOCK: Mutex<()> = Mutex::new(());
 
+    #[cfg(target_os = "macos")]
     fn with_temp_home<F: FnOnce()>(f: F) {
         let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = TempDir::new().expect("tempdir");

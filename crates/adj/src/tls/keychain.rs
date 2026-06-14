@@ -312,6 +312,9 @@ mod imp {
             Err(unsupported())
         }
 
+        // Mirrors the macOS KeychainKey API for symmetry; the non-macOS doctor path never calls
+        // it, so it's dead on these targets.
+        #[allow(dead_code)]
         pub fn sign_canary(&self) -> Result<()> {
             Err(unsupported())
         }
