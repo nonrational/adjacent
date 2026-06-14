@@ -52,9 +52,13 @@ pub fn https_port() -> u16 {
 /// Per-name boot lock map. Holding the inner `Mutex` while booting keeps the boot single-flight:
 /// concurrent waiters acquire the mutex one at a time, but the first one finishes the boot so
 /// every later acquirer sees the app already Running and returns immediately.
+///
+/// Entries are `Weak` so the map is bounded by in-flight boots rather than by every name ever
+/// requested — there is no app-removal RPC to hook cleanup onto, so a strong-reference map
+/// would keep entries for unregistered apps forever (issue #27).
 #[derive(Default)]
 pub struct BootGate {
-    locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    locks: Mutex<HashMap<String, std::sync::Weak<Mutex<()>>>>,
 }
 
 impl BootGate {
@@ -64,9 +68,13 @@ impl BootGate {
 
     async fn lock_for(&self, name: &str) -> Arc<Mutex<()>> {
         let mut map = self.locks.lock().await;
-        map.entry(name.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
+        map.retain(|_, weak| weak.strong_count() > 0);
+        if let Some(existing) = map.get(name).and_then(std::sync::Weak::upgrade) {
+            return existing;
+        }
+        let lock = Arc::new(Mutex::new(()));
+        map.insert(name.to_string(), Arc::downgrade(&lock));
+        lock
     }
 }
 
@@ -99,9 +107,12 @@ pub async fn run(supervisor: Arc<Supervisor>) -> Result<()> {
 /// HTTPS listener: terminates TLS with the locally-issued wildcard cert, then dispatches into
 /// the same per-request handler the HTTP path uses. Startup is best-effort — if the local CA
 /// hasn't been generated yet the daemon logs and keeps serving HTTP only (AC #5 in issue #6).
-pub async fn run_https(supervisor: Arc<Supervisor>) -> Result<()> {
-    let server_config = tls::server_config()
-        .map_err(|e| anyhow!("loading TLS config: {e}"))?;
+pub async fn run_https(
+    supervisor: Arc<Supervisor>,
+    resolver: Arc<tls::LeafResolver>,
+) -> Result<()> {
+    let server_config =
+        tls::server_config(resolver).map_err(|e| anyhow!("loading TLS config: {e}"))?;
     let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
 
     let port = https_port();
@@ -264,10 +275,19 @@ async fn ensure_running(
         Some(e) => e.clone(),
         None => return Err(ProxyError::NotRegistered),
     };
-    let cfg = registry::read_app_config(&entry.path).map_err(ProxyError::Other)?;
-    if cfg.name != name {
+    // A registered path can vanish out from under us (deleted worktree, deleted folder). Name
+    // the cause and the fix instead of letting read_app_config produce a confusing
+    // "no adjacent.toml found" boot failure.
+    if !entry.path.exists() {
         return Err(ProxyError::Other(anyhow!(
-            "adjacent.toml at {} declares name `{}`, not `{}`",
+            "registered path {} no longer exists — run `adj prune`",
+            entry.path.display()
+        )));
+    }
+    let cfg = registry::read_app_config(&entry.path).map_err(ProxyError::Other)?;
+    if registry::base_name(name) != cfg.name {
+        return Err(ProxyError::Other(anyhow!(
+            "adjacent.toml at {} declares name `{}`, which does not match `{}`",
             entry.path.display(),
             cfg.name,
             name
@@ -285,15 +305,18 @@ async fn ensure_running(
     let name_lock = gate.lock_for(name).await;
     let _guard = name_lock.lock().await;
 
+    // Capture the deadline before `up()` so a slow spawn counts against the boot budget —
+    // otherwise the total wait is up() time *plus* boot_timeout (issue #27).
+    let boot_timeout = boot_timeout_for(&cfg);
+    let deadline = tokio::time::Instant::now() + boot_timeout;
+
     if !matches!(supervisor.state(name).await, AppState::Running { .. }) {
         supervisor
-            .up(entry.path.clone(), cfg.clone())
+            .up(name, entry.path.clone(), cfg.clone())
             .await
             .map_err(ProxyError::Other)?;
     }
 
-    let boot_timeout = boot_timeout_for(&cfg);
-    let deadline = tokio::time::Instant::now() + boot_timeout;
     match wait_ready(name, supervisor.as_ref(), &cfg, deadline).await {
         Ok(port) => Ok(port),
         Err(crate::readiness::ReadinessError::Timeout) => Err(ProxyError::BootTimeout),
@@ -410,7 +433,12 @@ fn strip_port(host: &str) -> String {
 fn name_from_host(host: &str) -> Option<String> {
     let lower = host.to_ascii_lowercase();
     let prefix = lower.strip_suffix(HOST_SUFFIX)?;
-    if prefix.is_empty() || prefix.contains('.') {
+    // Accept `<name>` or `<label>.<name>` — at most one dot, no empty label on either side.
+    // Anything deeper has no registrable key, so reject rather than guess.
+    if prefix.is_empty() || prefix.matches('.').count() > 1 {
+        return None;
+    }
+    if prefix.split('.').any(|part| part.is_empty()) {
         return None;
     }
     Some(prefix.to_string())
@@ -444,12 +472,40 @@ mod tests {
         assert_eq!(strip_port("echo.adj.ac:80"), "echo.adj.ac");
     }
 
+    #[tokio::test]
+    async fn boot_gate_prunes_entries_once_unused() {
+        let gate = BootGate::new();
+        let lock_a = gate.lock_for("a").await;
+        assert_eq!(gate.locks.lock().await.len(), 1);
+
+        // While `a`'s lock is still held, asking for `b` must not prune it — and asking for
+        // `a` again must hand back the same Arc (single-flight depends on identity).
+        let lock_b = gate.lock_for("b").await;
+        let lock_a2 = gate.lock_for("a").await;
+        assert!(Arc::ptr_eq(&lock_a, &lock_a2));
+        assert_eq!(gate.locks.lock().await.len(), 2);
+
+        drop(lock_a);
+        drop(lock_a2);
+        drop(lock_b);
+        // All strong refs gone — the next lock_for sweeps the dead entries.
+        let _lock_c = gate.lock_for("c").await;
+        let map = gate.locks.lock().await;
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key("c"));
+    }
+
     #[test]
     fn extracts_name_from_adj_ac_host() {
         assert_eq!(name_from_host("echo.adj.ac"), Some("echo".into()));
         assert_eq!(name_from_host("ECHO.adj.ac"), Some("echo".into()));
-        // Multi-label subdomains aren't supported by registration (one name = one DNS label).
-        assert_eq!(name_from_host("a.b.adj.ac"), None);
+        // Worktree instances are `<label>.<name>` — exactly one dot in the prefix.
+        assert_eq!(name_from_host("feature-x.site.adj.ac"), Some("feature-x.site".into()));
+        // Deeper nesting is not a registrable key.
+        assert_eq!(name_from_host("a.b.c.adj.ac"), None);
+        // Empty labels on either side of the dot are invalid.
+        assert_eq!(name_from_host(".site.adj.ac"), None);
+        assert_eq!(name_from_host("x..adj.ac"), None);
         assert_eq!(name_from_host("example.com"), None);
         assert_eq!(name_from_host(".adj.ac"), None);
     }
