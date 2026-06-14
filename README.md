@@ -12,11 +12,11 @@ Homepage: [adj.ac/ent](https://adj.ac/ent)
 
 - **Config lives in code.** `adjacent.toml` sits in the app directory and registers via `adj add <path>`. The boot command and idle timeout are part of the repo, not buried in a global registry. Agents make config maintenance cheap.
 
-- **Lazy boot.** Apps don't run until a request hits `<name>.adj.ac`. Concurrent requests during boot wait on the same start.
+- **A URL per worktree.** Several agents in parallel git worktrees of one repo can all register. `adj add` names each instance after its branch — `feature-x.site.adj.ac` — each with its own process, port and logs. See [Worktrees](#worktrees).
+
+- **Boots on demand, stops when idle.** Apps don't run until a request hits `<name>.adj.ac`, and concurrent requests during boot wait on the same start. They stop after `idle_timeout` (default `"15m"`, accepts `"30s"` / `"1h"` / `"off"`) with no proxied traffic, so long sessions don't accumulate orphaned servers.
 
 - **Readiness before forwarding.** Default is TCP-connect; opt into HTTP probing with `health_check_url = "/healthz"`. The proxy never forwards to a half-booted process. Agents can block on this explicitly with `adj wait-ready`.
-
-- **Idle shutdown by default.** Apps stop after `idle_timeout` (default `"15m"`, accepts `"30s"` / `"1h"` / `"off"`) with no proxied traffic. Long sessions don't accumulate orphaned servers.
 
 - **The daemon owns ports.** `$PORT` is injected into the boot command; the app binds where it's told. Apps that need a different variable name set `port_env = "BIND_PORT"`.
 
@@ -46,6 +46,8 @@ Commands:
   up                    Boot a registered app
   down                  Stop a running app (SIGTERM, then SIGKILL after a grace period)
   restart               Restart an app (down then up)
+  remove                Remove an app from the registry (stopping it first if running)
+  prune                 Remove every registry entry whose directory no longer exists on disk
   status                Report the current state of an app
   logs                  Print the log file for an app
   wait-ready            Block until an app reports ready (TCP-open or 2xx from health_check_url)
@@ -59,6 +61,15 @@ Options:
   -h, --help     Print help
   -V, --version  Print version
 ```
+
+## Worktrees
+
+Four agents in four git worktrees of the same repo can all register. `adj add` inside a
+linked worktree names the instance after its branch: the worktree of `site` on branch
+`feature-x` serves at `feature-x.site.adj.ac`, while the main checkout keeps `site.adj.ac`.
+No flags needed (`--label` overrides the branch name); each worktree gets its own process,
+port and logs. When a worktree is deleted, `adj list` flags leftover entries as stale and
+`adj prune` clears them.
 
 ## Agent Integration
 

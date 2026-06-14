@@ -66,8 +66,8 @@ impl Supervisor {
             .unwrap_or(AppState::Stopped)
     }
 
-    pub async fn up(&self, app_dir: PathBuf, cfg: AppConfig) -> Result<u32> {
-        let name = cfg.name.clone();
+    pub async fn up(&self, name: &str, app_dir: PathBuf, cfg: AppConfig) -> Result<u32> {
+        let name = name.to_string();
         let mut inner = self.inner.lock().await;
         if let Some(rt) = inner.apps.get(&name) {
             if matches!(rt.state, AppState::Running { .. }) {
@@ -328,6 +328,34 @@ impl Supervisor {
             "failed to terminate `{}` within grace window",
             name
         ))
+    }
+
+    /// Drop the runtime entry for a deregistered app so a future re-registration starts from
+    /// a clean `Stopped` slate. Refuses to forget a Running entry — the proxy's lazy boot can
+    /// resurrect an app between `down` and the registry save (it reads the registry without
+    /// the registry lock), and dropping a live entry would orphan that process beyond the
+    /// idle scanner's reach. Returns whether the entry is gone (true if removed or never present).
+    ///
+    /// Callers don't need to act on the bool for correctness: if a Running entry survives here
+    /// because of the resurrection race, the idle scanner's next sweep reaps it once its registry
+    /// row is gone — regardless of the app's idle_timeout (`"off"` included), since the scanner
+    /// treats any running-but-unregistered app as an orphan. `adj down <name>` also still works
+    /// because `down` never consults the registry directly — it operates purely on supervisor
+    /// state.
+    ///
+    /// Port reservations are not leaked: the wait task that observes process exit already
+    /// calls `reserved_ports.remove(&port)` unconditionally, so by the time a non-Running
+    /// entry exists the port slot is already free.
+    pub async fn forget(&self, name: &str) -> bool {
+        let mut inner = self.inner.lock().await;
+        match inner.apps.get(name) {
+            Some(rt) if matches!(rt.state, AppState::Running { .. }) => false,
+            Some(_) => {
+                inner.apps.remove(name);
+                true
+            }
+            None => true,
+        }
     }
 
     /// Stamp `name`'s last-request timestamp. Called by the proxy on every routed request so
