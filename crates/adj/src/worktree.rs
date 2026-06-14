@@ -22,10 +22,12 @@ pub fn detect_label(dir: &Path) -> Result<Option<String>> {
     // a submodule whose repo simply lives under a directory named `worktrees`
     // (`…/worktrees/super/.git/modules/sub`) contains `/worktrees/` but not `/.git/worktrees/`,
     // and must not be mistaken for a linked worktree.
-    let gitfile = std::fs::read_to_string(dir.join(".git"))
-        .context("reading .git file")?;
+    let gitfile = std::fs::read_to_string(dir.join(".git")).context("reading .git file")?;
     let first_line = gitfile.lines().next().unwrap_or("").trim();
-    let pointer = first_line.strip_prefix("gitdir:").map(str::trim).unwrap_or("");
+    let pointer = first_line
+        .strip_prefix("gitdir:")
+        .map(str::trim)
+        .unwrap_or("");
     if !pointer.contains("/.git/worktrees/") {
         return Ok(None);
     }
@@ -116,7 +118,10 @@ mod tests {
         drop(f);
 
         let result = detect_label(dir.path()).expect("no error for submodule");
-        assert!(result.is_none(), "submodule should return Ok(None), got {result:?}");
+        assert!(
+            result.is_none(),
+            "submodule should return Ok(None), got {result:?}"
+        );
     }
 
     #[test]

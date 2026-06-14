@@ -139,7 +139,9 @@ ThreadingHTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
 "#
     );
     let script = dir.join("server.py");
-    tokio::fs::write(&script, py).await.expect("write server.py");
+    tokio::fs::write(&script, py)
+        .await
+        .expect("write server.py");
     format!("exec /usr/bin/python3 {}", script.display())
 }
 
@@ -162,13 +164,15 @@ ThreadingHTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
 "#
     );
     let script = dir.join("server.py");
-    tokio::fs::write(&script, py).await.expect("write server.py");
+    tokio::fs::write(&script, py)
+        .await
+        .expect("write server.py");
     format!("exec /usr/bin/python3 {}", script.display())
 }
 
 fn http_get(proxy_port: u16, host: &str, path: &str) -> Result<(String, String), String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", proxy_port))
-        .map_err(|e| format!("connect: {e}"))?;
+    let mut stream =
+        TcpStream::connect(("127.0.0.1", proxy_port)).map_err(|e| format!("connect: {e}"))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(70)))
         .map_err(|e| format!("set_read_timeout: {e}"))?;
@@ -251,7 +255,9 @@ class H(BaseHTTPRequestHandler):
 ThreadingHTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
 "#;
     let script = app_dir.path().join("server.py");
-    tokio::fs::write(&script, py).await.expect("write server.py");
+    tokio::fs::write(&script, py)
+        .await
+        .expect("write server.py");
     let cmd = format!("exec /usr/bin/python3 {}", script.display());
     let manifest = format!(
         "name = \"never-ready\"\ncmd = {cmd:?}\nhealth_check_url = \"/healthz\"\nboot_timeout = 1\n"
@@ -268,12 +274,11 @@ ThreadingHTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
 
     let proxy_port = sandbox.proxy_port;
     let start = Instant::now();
-    let (status_line, _body) = tokio::task::spawn_blocking(move || {
-        http_get(proxy_port, "never-ready.adj.ac", "/")
-    })
-    .await
-    .expect("join")
-    .expect("http_get");
+    let (status_line, _body) =
+        tokio::task::spawn_blocking(move || http_get(proxy_port, "never-ready.adj.ac", "/"))
+            .await
+            .expect("join")
+            .expect("http_get");
     let elapsed = start.elapsed();
 
     assert!(
@@ -450,7 +455,10 @@ async fn idle_timeout_stops_app_after_quiet_period() {
         .await
         .expect("status");
     let out = String::from_utf8_lossy(&status_idle.stdout);
-    assert!(out.contains("stopped"), "expected stopped after idle: {out}");
+    assert!(
+        out.contains("stopped"),
+        "expected stopped after idle: {out}"
+    );
 
     sandbox.stop_daemon().await;
 }

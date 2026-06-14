@@ -29,7 +29,9 @@ pub fn install() -> Result<()> {
     println!("# Adjacent port-forward installer");
     println!("#");
     println!("# Adjacent listens on :{http} (HTTP) and :{https} (HTTPS) — both high, unprivileged");
-    println!("# ports. To make :80/:443 reach them, install a pf NAT rule. Adjacent never escalates");
+    println!(
+        "# ports. To make :80/:443 reach them, install a pf NAT rule. Adjacent never escalates"
+    );
     println!("# — review and run these manually.");
     println!();
     println!("# 1. Anchor file ({anchor_path}):");
@@ -51,7 +53,9 @@ pub fn install() -> Result<()> {
     println!("# Note: the next command replaces the active NAT ruleset (current rules are");
     println!("# re-read via `pfctl -sn` and reloaded with the anchor prepended). If you manage");
     println!("# pf NAT rules outside /etc/pf.conf, review before running.");
-    println!("(echo 'rdr-anchor \"{ANCHOR_NAME}\" all'; sudo pfctl -sn 2>/dev/null) | sudo pfctl -f -");
+    println!(
+        "(echo 'rdr-anchor \"{ANCHOR_NAME}\" all'; sudo pfctl -sn 2>/dev/null) | sudo pfctl -f -"
+    );
     println!("sudo pfctl -E");
     Ok(())
 }

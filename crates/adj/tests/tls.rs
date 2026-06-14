@@ -86,7 +86,10 @@ impl TlsSandbox {
             .expect("install-ca");
         assert!(out.status.success(), "install-ca failed: {:?}", out);
         let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(stdout.contains("security add-trusted-cert"), "banner missing security command: {stdout}");
+        assert!(
+            stdout.contains("security add-trusted-cert"),
+            "banner missing security command: {stdout}"
+        );
         assert!(self.home_path.join("ca.crt").exists(), "ca.crt not created");
         // The CA key now lives in the macOS login keychain, not on disk.
         assert!(
@@ -223,7 +226,9 @@ ThreadingHTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
 "#
     );
     let script = dir.join("server.py");
-    tokio::fs::write(&script, py).await.expect("write server.py");
+    tokio::fs::write(&script, py)
+        .await
+        .expect("write server.py");
     format!("exec /usr/bin/python3 {}", script.display())
 }
 
@@ -243,7 +248,10 @@ async fn install_ca_generates_files_and_prints_macos_command() {
         .expect("install-ca rerun");
     assert!(again.status.success());
     let stdout = String::from_utf8_lossy(&again.stdout);
-    assert!(stdout.contains("Existing CA"), "second run should report existing CA: {stdout}");
+    assert!(
+        stdout.contains("Existing CA"),
+        "second run should report existing CA: {stdout}"
+    );
 }
 
 #[tokio::test]
@@ -374,10 +382,11 @@ async fn https_listener_is_best_effort_when_ca_missing() {
 
     // HTTP proxy should answer normally.
     let proxy_port = sandbox.proxy_port;
-    let (status_line, body) = tokio::task::spawn_blocking(move || http_get(proxy_port, "echo.adj.ac"))
-        .await
-        .expect("join")
-        .expect("http_get");
+    let (status_line, body) =
+        tokio::task::spawn_blocking(move || http_get(proxy_port, "echo.adj.ac"))
+            .await
+            .expect("join")
+            .expect("http_get");
     assert!(status_line.contains(" 200 "), "status: {status_line}");
     assert!(body.contains("http-still-works"), "body: {body}");
 
@@ -441,7 +450,10 @@ async fn doctor_reports_pass_for_marker_and_ca_under_sandbox() {
         "missing PF HTTPS pass line:\n{stdout}"
     );
     // CA inspection (cert file + keychain + sign canary) must pass after install_ca.
-    assert!(stdout.contains("*GOOD ca.crt"), "ca.crt check did not pass:\n{stdout}");
+    assert!(
+        stdout.contains("*GOOD ca.crt"),
+        "ca.crt check did not pass:\n{stdout}"
+    );
     assert!(
         stdout.contains("*GOOD login keychain entry"),
         "keychain check did not pass:\n{stdout}"
@@ -459,7 +471,9 @@ async fn doctor_reports_pass_for_marker_and_ca_under_sandbox() {
     );
     // System trust check fails too (no `security add-trusted-cert` in a sandboxed run).
     assert!(
-        stdout.contains(&format!("!FAIL HTTPS :{https_port} validates under system trust")),
+        stdout.contains(&format!(
+            "!FAIL HTTPS :{https_port} validates under system trust"
+        )),
         "system-trust check should have failed in sandbox:\n{stdout}"
     );
 
@@ -467,15 +481,19 @@ async fn doctor_reports_pass_for_marker_and_ca_under_sandbox() {
 }
 
 fn http_get(proxy_port: u16, host: &str) -> Result<(String, String), String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", proxy_port))
-        .map_err(|e| format!("connect: {e}"))?;
+    let mut stream =
+        TcpStream::connect(("127.0.0.1", proxy_port)).map_err(|e| format!("connect: {e}"))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(70)))
         .map_err(|e| format!("set_read_timeout: {e}"))?;
     let req = format!("GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
-    stream.write_all(req.as_bytes()).map_err(|e| format!("write: {e}"))?;
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| format!("write: {e}"))?;
     let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).map_err(|e| format!("read: {e}"))?;
+    stream
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("read: {e}"))?;
     let text = String::from_utf8_lossy(&buf).to_string();
     let mut parts = text.splitn(2, "\r\n");
     let status_line = parts.next().unwrap_or("").to_string();

@@ -111,17 +111,19 @@ async fn write_app(dir: &Path, name: &str, cmd: &str) {
 
 /// Send an HTTP GET to the proxy with the given Host header, return (status_line, raw_headers, body).
 fn http_get(proxy_port: u16, host: &str, path: &str) -> Result<(String, String, String), String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", proxy_port))
-        .map_err(|e| format!("connect: {e}"))?;
+    let mut stream =
+        TcpStream::connect(("127.0.0.1", proxy_port)).map_err(|e| format!("connect: {e}"))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .map_err(|e| format!("set_read_timeout: {e}"))?;
-    let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-    );
-    stream.write_all(req.as_bytes()).map_err(|e| format!("write: {e}"))?;
+    let req = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| format!("write: {e}"))?;
     let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).map_err(|e| format!("read: {e}"))?;
+    stream
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("read: {e}"))?;
     let text = String::from_utf8_lossy(&buf).to_string();
     let mut parts = text.splitn(2, "\r\n");
     let status_line = parts.next().unwrap_or("").to_string();
@@ -140,14 +142,16 @@ async fn status_subdomain_serves_html_dashboard() {
     sandbox.start_daemon().await;
 
     let proxy_port = sandbox.proxy_port;
-    let (status_line, headers, body) = tokio::task::spawn_blocking(move || {
-        http_get(proxy_port, "status.adj.ac", "/")
-    })
-    .await
-    .expect("join")
-    .expect("http_get");
+    let (status_line, headers, body) =
+        tokio::task::spawn_blocking(move || http_get(proxy_port, "status.adj.ac", "/"))
+            .await
+            .expect("join")
+            .expect("http_get");
 
-    assert!(status_line.contains(" 200 "), "expected 200, got: {status_line}");
+    assert!(
+        status_line.contains(" 200 "),
+        "expected 200, got: {status_line}"
+    );
     let headers_lower = headers.to_ascii_lowercase();
     assert!(
         headers_lower.contains("content-type: text/html"),
@@ -185,14 +189,16 @@ async fn status_apps_json_lists_registered_apps() {
     assert!(add.status.success(), "add: {:?}", add);
 
     let proxy_port = sandbox.proxy_port;
-    let (status_line, headers, body) = tokio::task::spawn_blocking(move || {
-        http_get(proxy_port, "status.adj.ac", "/apps.json")
-    })
-    .await
-    .expect("join")
-    .expect("http_get");
+    let (status_line, headers, body) =
+        tokio::task::spawn_blocking(move || http_get(proxy_port, "status.adj.ac", "/apps.json"))
+            .await
+            .expect("join")
+            .expect("http_get");
 
-    assert!(status_line.contains(" 200 "), "expected 200, got: {status_line}");
+    assert!(
+        status_line.contains(" 200 "),
+        "expected 200, got: {status_line}"
+    );
     let headers_lower = headers.to_ascii_lowercase();
     assert!(
         headers_lower.contains("content-type: application/json"),
@@ -220,14 +226,16 @@ async fn status_subdomain_returns_404_for_unknown_path() {
     sandbox.start_daemon().await;
 
     let proxy_port = sandbox.proxy_port;
-    let (status_line, _headers, _body) = tokio::task::spawn_blocking(move || {
-        http_get(proxy_port, "status.adj.ac", "/nope")
-    })
-    .await
-    .expect("join")
-    .expect("http_get");
+    let (status_line, _headers, _body) =
+        tokio::task::spawn_blocking(move || http_get(proxy_port, "status.adj.ac", "/nope"))
+            .await
+            .expect("join")
+            .expect("http_get");
 
-    assert!(status_line.contains(" 404 "), "expected 404, got: {status_line}");
+    assert!(
+        status_line.contains(" 404 "),
+        "expected 404, got: {status_line}"
+    );
 
     sandbox.stop_daemon().await;
 }
@@ -253,12 +261,11 @@ async fn status_apps_json_marks_vanished_path_as_missing() {
     drop(app_dir);
 
     let proxy_port = sandbox.proxy_port;
-    let (status_line, _headers, body) = tokio::task::spawn_blocking(move || {
-        http_get(proxy_port, "status.adj.ac", "/apps.json")
-    })
-    .await
-    .expect("join")
-    .expect("http_get");
+    let (status_line, _headers, body) =
+        tokio::task::spawn_blocking(move || http_get(proxy_port, "status.adj.ac", "/apps.json"))
+            .await
+            .expect("join")
+            .expect("http_get");
 
     assert!(status_line.contains(" 200 "), "expected 200: {status_line}");
     let parsed: serde_json::Value =

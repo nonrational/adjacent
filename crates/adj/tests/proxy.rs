@@ -113,9 +113,7 @@ async fn write_app(dir: &Path, name: &str, cmd: &str) {
 
 async fn write_app_with_boot_timeout(dir: &Path, name: &str, cmd: &str, boot_timeout: u64) {
     let manifest = dir.join("adjacent.toml");
-    let body = format!(
-        "name = \"{name}\"\ncmd = \"{cmd}\"\nboot_timeout = {boot_timeout}\n"
-    );
+    let body = format!("name = \"{name}\"\ncmd = \"{cmd}\"\nboot_timeout = {boot_timeout}\n");
     tokio::fs::write(manifest, body).await.expect("write toml");
 }
 
@@ -141,7 +139,9 @@ ThreadingHTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
 "#
     );
     let script = dir.join("server.py");
-    tokio::fs::write(&script, py).await.expect("write server.py");
+    tokio::fs::write(&script, py)
+        .await
+        .expect("write server.py");
     format!("exec /usr/bin/python3 {}", script.display())
 }
 
@@ -164,7 +164,9 @@ class H(BaseHTTPRequestHandler):
 ThreadingHTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
 "#;
     let script = dir.join("server.py");
-    tokio::fs::write(&script, py).await.expect("write server.py");
+    tokio::fs::write(&script, py)
+        .await
+        .expect("write server.py");
     format!("exec /usr/bin/python3 {}", script.display())
 }
 
@@ -237,8 +239,8 @@ fn http_get_with_headers(
     path: &str,
     extra_headers: &[(&str, &str)],
 ) -> Result<(String, String), String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", proxy_port))
-        .map_err(|e| format!("connect: {e}"))?;
+    let mut stream =
+        TcpStream::connect(("127.0.0.1", proxy_port)).map_err(|e| format!("connect: {e}"))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(70)))
         .map_err(|e| format!("set_read_timeout: {e}"))?;
@@ -246,12 +248,14 @@ fn http_get_with_headers(
         .iter()
         .map(|(k, v)| format!("{k}: {v}\r\n"))
         .collect();
-    let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\n{extra}Connection: close\r\n\r\n"
-    );
-    stream.write_all(req.as_bytes()).map_err(|e| format!("write: {e}"))?;
+    let req = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n{extra}Connection: close\r\n\r\n");
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| format!("write: {e}"))?;
     let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).map_err(|e| format!("read: {e}"))?;
+    stream
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("read: {e}"))?;
     let text = String::from_utf8_lossy(&buf).to_string();
     let mut parts = text.splitn(2, "\r\n");
     let status_line = parts.next().unwrap_or("").to_string();
@@ -284,12 +288,11 @@ async fn proxy_lazy_boots_app_and_forwards_response() {
     assert!(add.status.success(), "add: {:?}", add);
 
     let proxy_port = sandbox.proxy_port;
-    let (status_line, body) = tokio::task::spawn_blocking(move || {
-        http_get(proxy_port, "echo.adj.ac", "/")
-    })
-    .await
-    .expect("join")
-    .expect("http_get");
+    let (status_line, body) =
+        tokio::task::spawn_blocking(move || http_get(proxy_port, "echo.adj.ac", "/"))
+            .await
+            .expect("join")
+            .expect("http_get");
 
     assert!(
         status_line.contains(" 200 "),
@@ -325,12 +328,11 @@ async fn verify_marker_short_circuits_before_boot_gate() {
     sandbox.start_daemon().await;
 
     let proxy_port = sandbox.proxy_port;
-    let (status_line, body) = tokio::task::spawn_blocking(move || {
-        http_get(proxy_port, "__adj_verify__.adj.ac", "/")
-    })
-    .await
-    .expect("join")
-    .expect("http_get");
+    let (status_line, body) =
+        tokio::task::spawn_blocking(move || http_get(proxy_port, "__adj_verify__.adj.ac", "/"))
+            .await
+            .expect("join")
+            .expect("http_get");
 
     assert!(
         status_line.contains(" 200 "),
@@ -380,12 +382,11 @@ async fn proxy_forwards_x_forwarded_headers_to_upstream() {
     let proxy_port = sandbox.proxy_port;
 
     // Clean request: all three headers must be added.
-    let (status_line, body) = tokio::task::spawn_blocking(move || {
-        http_get(proxy_port, "fwd.adj.ac", "/")
-    })
-    .await
-    .expect("join")
-    .expect("http_get");
+    let (status_line, body) =
+        tokio::task::spawn_blocking(move || http_get(proxy_port, "fwd.adj.ac", "/"))
+            .await
+            .expect("join")
+            .expect("http_get");
     assert!(status_line.contains(" 200 "), "status: {status_line}");
     assert!(
         body.contains("X-Forwarded-Host=fwd.adj.ac"),
@@ -420,12 +421,11 @@ async fn proxy_forwards_x_forwarded_headers_to_upstream() {
 
     // The original Host's port must survive into X-Forwarded-Host — in the default no-pfctl setup
     // the browser sends `Host: fwd.adj.ac:8080`, and an app rebuilds a routable origin from it.
-    let (status_line, body) = tokio::task::spawn_blocking(move || {
-        http_get(proxy_port, "fwd.adj.ac:8080", "/")
-    })
-    .await
-    .expect("join")
-    .expect("http_get");
+    let (status_line, body) =
+        tokio::task::spawn_blocking(move || http_get(proxy_port, "fwd.adj.ac:8080", "/"))
+            .await
+            .expect("join")
+            .expect("http_get");
     assert!(status_line.contains(" 200 "), "status: {status_line}");
     assert!(
         body.contains("X-Forwarded-Host=fwd.adj.ac:8080"),
@@ -475,19 +475,17 @@ fn ws_echo_roundtrip(stream: &mut TcpStream, msg: &str) -> Result<String, String
     assert!(payload.len() < 126, "test frames must fit a 7-bit length");
     let mut frame = vec![0x81, 0x80 | payload.len() as u8];
     frame.extend_from_slice(&mask);
-    frame.extend(
-        payload
-            .iter()
-            .enumerate()
-            .map(|(i, b)| b ^ mask[i % 4]),
-    );
+    frame.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
     stream
         .write_all(&frame)
         .map_err(|e| format!("write frame: {e}"))?;
 
     let hdr = read_exact_n(stream, 2)?;
     if hdr[0] != 0x81 {
-        return Err(format!("expected FIN text frame, got first byte {:#04x}", hdr[0]));
+        return Err(format!(
+            "expected FIN text frame, got first byte {:#04x}",
+            hdr[0]
+        ));
     }
     let len = (hdr[1] & 0x7F) as usize;
     let body = read_exact_n(stream, len)?;
@@ -518,8 +516,7 @@ async fn proxy_propagates_websocket_upgrade_and_pipes_frames() {
     let proxy_port = sandbox.proxy_port;
 
     tokio::task::spawn_blocking(move || {
-        let mut stream =
-            TcpStream::connect(("127.0.0.1", proxy_port)).expect("connect proxy");
+        let mut stream = TcpStream::connect(("127.0.0.1", proxy_port)).expect("connect proxy");
         stream
             .set_read_timeout(Some(Duration::from_secs(70)))
             .expect("set_read_timeout");
@@ -666,12 +663,11 @@ async fn proxy_returns_504_when_boot_times_out() {
 
     let proxy_port = sandbox.proxy_port;
     let start = Instant::now();
-    let (status_line, _body) = tokio::task::spawn_blocking(move || {
-        http_get(proxy_port, "slowboot.adj.ac", "/")
-    })
-    .await
-    .expect("join")
-    .expect("http_get");
+    let (status_line, _body) =
+        tokio::task::spawn_blocking(move || http_get(proxy_port, "slowboot.adj.ac", "/"))
+            .await
+            .expect("join")
+            .expect("http_get");
     let elapsed = start.elapsed();
 
     assert!(
@@ -708,7 +704,10 @@ async fn install_port_forward_prints_pf_anchor_and_sudo_commands() {
         "missing rdr/loopback in output: {stdout}"
     );
     // Sudo command shape.
-    assert!(stdout.contains("sudo pfctl"), "missing sudo pfctl: {stdout}");
+    assert!(
+        stdout.contains("sudo pfctl"),
+        "missing sudo pfctl: {stdout}"
+    );
     // The reload pipeline replaces the active NAT ruleset — output must warn about it.
     assert!(
         stdout.contains("replaces the active NAT ruleset"),

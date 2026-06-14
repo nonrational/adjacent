@@ -220,7 +220,10 @@ fn ensure_leaf(sans: &[String]) -> Result<(String, String)> {
         // A corrupt cached leaf should heal via re-issue, not wedge HTTPS forever. Read errors
         // (non-UTF-8 bytes, permissions) fall through to issue_leaf just like parse errors —
         // only a readable, parseable cert that already covers the desired SANs short-circuits.
-        match (fs::read_to_string(&cert_path), fs::read_to_string(&key_path)) {
+        match (
+            fs::read_to_string(&cert_path),
+            fs::read_to_string(&key_path),
+        ) {
             (Ok(cert), Ok(key)) => match leaf_covers(&cert, sans) {
                 Ok(true) => return Ok((cert, key)),
                 Ok(false) | Err(_) => {}
@@ -280,7 +283,9 @@ fn issue_leaf(sans: &[String]) -> Result<(String, String)> {
         .iter()
         .map(|s| {
             Ok(SanType::DnsName(
-                s.as_str().try_into().with_context(|| format!("SAN `{s}`"))?,
+                s.as_str()
+                    .try_into()
+                    .with_context(|| format!("SAN `{s}`"))?,
             ))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -304,7 +309,10 @@ fn build_ca_params() -> CertificateParams {
     // Embed seconds-since-epoch in the OU so repeated installs are distinguishable in Keychain
     // Access — humans can tell two "Adjacent local" entries apart by clicking through.
     if let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) {
-        dn.push(DnType::OrganizationalUnitName, format!("ca-{}", now.as_secs()));
+        dn.push(
+            DnType::OrganizationalUnitName,
+            format!("ca-{}", now.as_secs()),
+        );
     }
     params.distinguished_name = dn;
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -354,7 +362,9 @@ fn write_private_pem(path: &Path, contents: &str) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut opts = fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true).mode(0o600);
-    let mut file = opts.open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut file = opts
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
     use std::io::Write;
     file.write_all(contents.as_bytes())
         .with_context(|| format!("writing {}", path.display()))?;
@@ -469,9 +479,24 @@ mod tests {
     fn registry_sans_adds_wildcard_per_base() {
         use crate::registry::AppEntry;
         let mut reg = Registry::default();
-        reg.insert("site".into(), AppEntry { path: "/tmp/a".into() });
-        reg.insert("feature-x.site".into(), AppEntry { path: "/tmp/b".into() });
-        reg.insert("api".into(), AppEntry { path: "/tmp/c".into() });
+        reg.insert(
+            "site".into(),
+            AppEntry {
+                path: "/tmp/a".into(),
+            },
+        );
+        reg.insert(
+            "feature-x.site".into(),
+            AppEntry {
+                path: "/tmp/b".into(),
+            },
+        );
+        reg.insert(
+            "api".into(),
+            AppEntry {
+                path: "/tmp/c".into(),
+            },
+        );
         let expected: Vec<String> = ["adj.ac", "*.adj.ac", "*.api.adj.ac", "*.site.adj.ac"]
             .iter()
             .map(|s| s.to_string())
@@ -513,9 +538,7 @@ mod tests {
                         .general_names
                         .iter()
                         .filter_map(|gn| match gn {
-                            x509_parser::extensions::GeneralName::DNSName(n) => {
-                                Some(n.to_string())
-                            }
+                            x509_parser::extensions::GeneralName::DNSName(n) => Some(n.to_string()),
                             _ => None,
                         })
                         .collect()
@@ -527,13 +550,24 @@ mod tests {
             let resolver = LeafResolver::new().expect("resolver");
             let before = resolver.current_cert_der();
             let mut reg = Registry::default();
-            reg.insert("feature-x.site".into(), AppEntry { path: "/tmp/a".into() });
+            reg.insert(
+                "feature-x.site".into(),
+                AppEntry {
+                    path: "/tmp/a".into(),
+                },
+            );
             reg.save().expect("save registry");
             resolver.reload().expect("reload");
             let after = resolver.current_cert_der();
             let wildcard = "*.site.adj.ac".to_string();
-            assert!(!dns_sans(&before).contains(&wildcard), "old cert must not cover it");
-            assert!(dns_sans(&after).contains(&wildcard), "reload must swap in the new leaf");
+            assert!(
+                !dns_sans(&before).contains(&wildcard),
+                "old cert must not cover it"
+            );
+            assert!(
+                dns_sans(&after).contains(&wildcard),
+                "reload must swap in the new leaf"
+            );
         });
     }
 
