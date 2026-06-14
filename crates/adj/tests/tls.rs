@@ -26,11 +26,14 @@ fn adj_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_adj"))
 }
 
-fn pick_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind :0");
-    l.local_addr().expect("local_addr").port()
+/// Parse a `<port>\n` file the daemon writes after binding a listener. `None` until the file
+/// exists with a complete write.
+fn read_port_file(path: &Path) -> Option<u16> {
+    let s = std::fs::read_to_string(path).ok()?;
+    s.trim().parse().ok()
 }
 
+#[cfg(target_os = "macos")]
 fn curl_available() -> bool {
     std::process::Command::new("which")
         .arg("curl")
@@ -54,8 +57,12 @@ impl TlsSandbox {
         Self {
             _home: home,
             home_path,
-            proxy_port: pick_port(),
-            https_port: pick_port(),
+            // 0 = the daemon binds kernel-assigned ports; start_daemon learns the real ports
+            // from the proxy.port / https.port files. Picking free ports here and re-binding
+            // them in the daemon raced concurrent test processes drawing from the same
+            // ephemeral range, which flaked as "connection reset by peer".
+            proxy_port: 0,
+            https_port: 0,
             daemon: None,
         }
     }
@@ -71,6 +78,7 @@ impl TlsSandbox {
         c
     }
 
+    #[cfg(target_os = "macos")]
     async fn install_ca(&self) {
         let out = self
             .cmd()
@@ -80,7 +88,10 @@ impl TlsSandbox {
             .expect("install-ca");
         assert!(out.status.success(), "install-ca failed: {:?}", out);
         let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(stdout.contains("security add-trusted-cert"), "banner missing security command: {stdout}");
+        assert!(
+            stdout.contains("security add-trusted-cert"),
+            "banner missing security command: {stdout}"
+        );
         assert!(self.home_path.join("ca.crt").exists(), "ca.crt not created");
         // The CA key now lives in the macOS login keychain, not on disk.
         assert!(
@@ -93,6 +104,7 @@ impl TlsSandbox {
         );
     }
 
+    #[cfg(target_os = "macos")]
     async fn start_daemon(&mut self) {
         let mut c = self.cmd();
         c.arg("daemon");
@@ -101,14 +113,14 @@ impl TlsSandbox {
         let child = c.spawn().expect("spawn daemon");
         self.daemon = Some(child);
 
-        // Wait for the control socket, the HTTP proxy port, AND the HTTPS port to bind.
+        // Wait for the control socket, the HTTP proxy port, AND the HTTPS port to bind. The
+        // daemon records each listener's kernel-assigned port after a successful bind, so a
+        // parsed port file means the listener is live and unambiguously ours.
         let deadline = Instant::now() + Duration::from_secs(5);
         let sock = self.home_path.join("sock");
-        let http_addr = format!("127.0.0.1:{}", self.proxy_port);
-        let https_addr = format!("127.0.0.1:{}", self.https_port);
+        let http_port_file = self.home_path.join("proxy.port");
+        let https_port_file = self.home_path.join("https.port");
         let mut sock_ready = false;
-        let mut http_ready = false;
-        let mut https_ready = false;
         while Instant::now() < deadline {
             if !sock_ready && sock.exists() {
                 let out = self
@@ -123,19 +135,24 @@ impl TlsSandbox {
                     sock_ready = true;
                 }
             }
-            if !http_ready && TcpStream::connect(&http_addr).is_ok() {
-                http_ready = true;
+            if self.proxy_port == 0 {
+                if let Some(p) = read_port_file(&http_port_file) {
+                    self.proxy_port = p;
+                }
             }
-            if !https_ready && TcpStream::connect(&https_addr).is_ok() {
-                https_ready = true;
+            if self.https_port == 0 {
+                if let Some(p) = read_port_file(&https_port_file) {
+                    self.https_port = p;
+                }
             }
-            if sock_ready && http_ready && https_ready {
+            if sock_ready && self.proxy_port != 0 && self.https_port != 0 {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         panic!(
-            "daemon did not come up within 5s (sock={sock_ready}, http={http_ready}, https={https_ready})"
+            "daemon did not come up within 5s (sock={sock_ready}, http_port={}, https_port={})",
+            self.proxy_port, self.https_port
         );
     }
 
@@ -149,11 +166,14 @@ impl TlsSandbox {
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let sock = self.home_path.join("sock");
-        let http_addr = format!("127.0.0.1:{}", self.proxy_port);
+        let http_port_file = self.home_path.join("proxy.port");
         while Instant::now() < deadline {
-            let sock_ready = sock.exists();
-            let http_ready = TcpStream::connect(&http_addr).is_ok();
-            if sock_ready && http_ready {
+            if self.proxy_port == 0 {
+                if let Some(p) = read_port_file(&http_port_file) {
+                    self.proxy_port = p;
+                }
+            }
+            if sock.exists() && self.proxy_port != 0 {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -209,12 +229,17 @@ ThreadingHTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
 "#
     );
     let script = dir.join("server.py");
-    tokio::fs::write(&script, py).await.expect("write server.py");
+    tokio::fs::write(&script, py)
+        .await
+        .expect("write server.py");
     format!("exec /usr/bin/python3 {}", script.display())
 }
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
+// The keychain guard intentionally spans the test's awaits to serialize on LOGIN_KEYCHAIN_LOCK;
+// a current-thread tokio runtime can't deadlock on it, so the std-guard-across-await lint is moot.
+#[allow(clippy::await_holding_lock)]
 async fn install_ca_generates_files_and_prints_macos_command() {
     let _guard = lock_login_keychain();
     let sandbox = TlsSandbox::new().await;
@@ -229,12 +254,20 @@ async fn install_ca_generates_files_and_prints_macos_command() {
         .expect("install-ca rerun");
     assert!(again.status.success());
     let stdout = String::from_utf8_lossy(&again.stdout);
-    assert!(stdout.contains("Existing CA"), "second run should report existing CA: {stdout}");
+    assert!(
+        stdout.contains("Existing CA"),
+        "second run should report existing CA: {stdout}"
+    );
 }
 
 #[tokio::test]
 async fn install_port_forward_emits_both_http_and_https_rules() {
-    let sandbox = TlsSandbox::new().await;
+    let mut sandbox = TlsSandbox::new().await;
+    // No daemon runs here — install-port-forward only renders text from the env vars, so
+    // fixed values keep the assertions meaningful (the sandbox default of 0 would have the
+    // rules — and the assertions — say "port 0").
+    sandbox.proxy_port = 18080;
+    sandbox.https_port = 18443;
     let out = sandbox
         .cmd()
         .arg("install-port-forward")
@@ -257,6 +290,8 @@ async fn install_port_forward_emits_both_http_and_https_rules() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
+// See install_ca test: keychain guard deliberately held across awaits, single-threaded runtime.
+#[allow(clippy::await_holding_lock)]
 async fn https_proxy_forwards_request_through_tls_termination() {
     if !curl_available() {
         eprintln!("curl not on PATH — skipping TLS forward test");
@@ -355,21 +390,21 @@ async fn https_listener_is_best_effort_when_ca_missing() {
 
     // HTTP proxy should answer normally.
     let proxy_port = sandbox.proxy_port;
-    let (status_line, body) = tokio::task::spawn_blocking(move || http_get(proxy_port, "echo.adj.ac"))
-        .await
-        .expect("join")
-        .expect("http_get");
+    let (status_line, body) =
+        tokio::task::spawn_blocking(move || http_get(proxy_port, "echo.adj.ac"))
+            .await
+            .expect("join")
+            .expect("http_get");
     assert!(status_line.contains(" 200 "), "status: {status_line}");
     assert!(body.contains("http-still-works"), "body: {body}");
 
-    // HTTPS port should NOT be bound — the listener task exited at startup because the CA is
-    // missing. Give it a beat to actually exit and then probe.
+    // HTTPS should NOT have bound — the listener task exited at startup because the CA is
+    // missing. It records its port in https.port only after a successful bind, so the file
+    // staying absent is the signal. Give the task a beat to run first.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let https_addr = format!("127.0.0.1:{}", sandbox.https_port);
     assert!(
-        TcpStream::connect_timeout(&https_addr.parse().unwrap(), Duration::from_millis(200))
-            .is_err(),
-        "https port should not be bound when CA is missing"
+        !sandbox.home_path.join("https.port").exists(),
+        "https.port should not exist when the CA is missing"
     );
 
     let _ = sandbox.cmd().arg("down").arg("echo").output().await;
@@ -384,6 +419,8 @@ async fn https_listener_is_best_effort_when_ca_missing() {
 /// exits with status 2 — the "doctor ran and found problems" sentinel.
 #[cfg(target_os = "macos")]
 #[tokio::test]
+// See install_ca test: keychain guard deliberately held across awaits, single-threaded runtime.
+#[allow(clippy::await_holding_lock)]
 async fn doctor_reports_pass_for_marker_and_ca_under_sandbox() {
     let _guard = lock_login_keychain();
     let mut sandbox = TlsSandbox::new().await;
@@ -423,7 +460,10 @@ async fn doctor_reports_pass_for_marker_and_ca_under_sandbox() {
         "missing PF HTTPS pass line:\n{stdout}"
     );
     // CA inspection (cert file + keychain + sign canary) must pass after install_ca.
-    assert!(stdout.contains("*GOOD ca.crt"), "ca.crt check did not pass:\n{stdout}");
+    assert!(
+        stdout.contains("*GOOD ca.crt"),
+        "ca.crt check did not pass:\n{stdout}"
+    );
     assert!(
         stdout.contains("*GOOD login keychain entry"),
         "keychain check did not pass:\n{stdout}"
@@ -441,7 +481,9 @@ async fn doctor_reports_pass_for_marker_and_ca_under_sandbox() {
     );
     // System trust check fails too (no `security add-trusted-cert` in a sandboxed run).
     assert!(
-        stdout.contains(&format!("!FAIL HTTPS :{https_port} validates under system trust")),
+        stdout.contains(&format!(
+            "!FAIL HTTPS :{https_port} validates under system trust"
+        )),
         "system-trust check should have failed in sandbox:\n{stdout}"
     );
 
@@ -449,15 +491,19 @@ async fn doctor_reports_pass_for_marker_and_ca_under_sandbox() {
 }
 
 fn http_get(proxy_port: u16, host: &str) -> Result<(String, String), String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", proxy_port))
-        .map_err(|e| format!("connect: {e}"))?;
+    let mut stream =
+        TcpStream::connect(("127.0.0.1", proxy_port)).map_err(|e| format!("connect: {e}"))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(70)))
         .map_err(|e| format!("set_read_timeout: {e}"))?;
     let req = format!("GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
-    stream.write_all(req.as_bytes()).map_err(|e| format!("write: {e}"))?;
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| format!("write: {e}"))?;
     let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).map_err(|e| format!("read: {e}"))?;
+    stream
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("read: {e}"))?;
     let text = String::from_utf8_lossy(&buf).to_string();
     let mut parts = text.splitn(2, "\r\n");
     let status_line = parts.next().unwrap_or("").to_string();

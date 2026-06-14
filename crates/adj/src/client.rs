@@ -8,6 +8,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use crate::paths;
+use crate::worktree;
 
 async fn connect() -> Result<UnixStream> {
     let socket = paths::socket_path()?;
@@ -46,14 +47,19 @@ fn into_error(resp: Response) -> Result<Response> {
     }
 }
 
-pub async fn add(path: String) -> Result<()> {
+pub async fn add(path: String, label: Option<String>) -> Result<()> {
     // Canonicalize on the client side: relative paths must resolve against the user's CWD,
     // not the daemon's. The daemon may have been launched from anywhere (or by launchd).
-    let canon = std::fs::canonicalize(&path)
-        .with_context(|| format!("resolving path {}", path))?;
+    let canon = std::fs::canonicalize(&path).with_context(|| format!("resolving path {}", path))?;
+    // `--label` wins; otherwise a linked git worktree names its instance after the branch.
+    let label = match label {
+        Some(l) => Some(l),
+        None => worktree::detect_label(&canon)?,
+    };
     let resp = into_error(
         request(Request::Add {
             path: canon.display().to_string(),
+            label,
         })
         .await?,
     )?;
@@ -73,6 +79,7 @@ pub async fn list(json: bool) -> Result<()> {
                     name: &e.name,
                     path: &e.path,
                     state: &e.state,
+                    stale: e.stale,
                 })
                 .collect();
             let out = serde_json::to_string(&dtos)?;
@@ -83,8 +90,37 @@ pub async fn list(json: bool) -> Result<()> {
             println!("no apps registered");
             return Ok(());
         }
-        for entry in entries {
-            println!("{:<20} {:<10} {}", entry.name, entry.state, entry.path);
+        for entry in &entries {
+            if entry.stale {
+                println!(
+                    "{:<20} {:<10} {} (path missing — run `adj prune`)",
+                    entry.name, "stale", entry.path
+                );
+            } else {
+                println!("{:<20} {:<10} {}", entry.name, entry.state, entry.path);
+            }
+        }
+    }
+    Ok(())
+}
+
+pub async fn remove(name: String) -> Result<()> {
+    let resp = into_error(request(Request::Remove { name }).await?)?;
+    if let Response::Removed { name } = resp {
+        println!("removed `{name}`");
+    }
+    Ok(())
+}
+
+pub async fn prune() -> Result<()> {
+    let resp = into_error(request(Request::Prune).await?)?;
+    if let Response::Pruned { removed } = resp {
+        if removed.is_empty() {
+            println!("nothing to prune");
+        } else {
+            for name in removed {
+                println!("pruned `{name}`");
+            }
         }
     }
     Ok(())

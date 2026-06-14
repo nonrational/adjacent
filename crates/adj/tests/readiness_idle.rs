@@ -11,9 +11,11 @@ fn adj_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_adj"))
 }
 
-fn pick_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind :0");
-    l.local_addr().expect("local_addr").port()
+/// Parse a `<port>\n` file the daemon writes after binding a listener. `None` until the file
+/// exists with a complete write.
+fn read_port_file(path: &Path) -> Option<u16> {
+    let s = std::fs::read_to_string(path).ok()?;
+    s.trim().parse().ok()
 }
 
 struct Sandbox {
@@ -30,7 +32,11 @@ impl Sandbox {
         Self {
             _home: home,
             home_path,
-            proxy_port: pick_port(),
+            // 0 = the daemon binds a kernel-assigned port; start_daemon learns the real port
+            // from the proxy.port file. Picking a free port here and re-binding it in the
+            // daemon raced concurrent test processes drawing from the same ephemeral range,
+            // which flaked as "connection reset by peer" against a foreign listener.
+            proxy_port: 0,
             daemon: None,
         }
     }
@@ -55,9 +61,8 @@ impl Sandbox {
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let sock = self.home_path.join("sock");
-        let proxy_addr = format!("127.0.0.1:{}", self.proxy_port);
+        let port_file = self.home_path.join("proxy.port");
         let mut sock_ready = false;
-        let mut proxy_ready = false;
         while Instant::now() < deadline {
             if !sock_ready && sock.exists() {
                 let out = self
@@ -72,15 +77,22 @@ impl Sandbox {
                     sock_ready = true;
                 }
             }
-            if !proxy_ready && TcpStream::connect(&proxy_addr).is_ok() {
-                proxy_ready = true;
+            // proxy.port is written after bind, so a parsed port means the listener is live —
+            // and unambiguously ours, unlike a bare TCP connect to a guessed port.
+            if self.proxy_port == 0 {
+                if let Some(p) = read_port_file(&port_file) {
+                    self.proxy_port = p;
+                }
             }
-            if sock_ready && proxy_ready {
+            if sock_ready && self.proxy_port != 0 {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        panic!("daemon did not come up within 5s (sock={sock_ready}, proxy={proxy_ready})");
+        panic!(
+            "daemon did not come up within 5s (sock={sock_ready}, proxy_port={})",
+            self.proxy_port
+        );
     }
 
     async fn stop_daemon(&mut self) {
@@ -127,7 +139,9 @@ ThreadingHTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
 "#
     );
     let script = dir.join("server.py");
-    tokio::fs::write(&script, py).await.expect("write server.py");
+    tokio::fs::write(&script, py)
+        .await
+        .expect("write server.py");
     format!("exec /usr/bin/python3 {}", script.display())
 }
 
@@ -150,13 +164,15 @@ ThreadingHTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
 "#
     );
     let script = dir.join("server.py");
-    tokio::fs::write(&script, py).await.expect("write server.py");
+    tokio::fs::write(&script, py)
+        .await
+        .expect("write server.py");
     format!("exec /usr/bin/python3 {}", script.display())
 }
 
 fn http_get(proxy_port: u16, host: &str, path: &str) -> Result<(String, String), String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", proxy_port))
-        .map_err(|e| format!("connect: {e}"))?;
+    let mut stream =
+        TcpStream::connect(("127.0.0.1", proxy_port)).map_err(|e| format!("connect: {e}"))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(70)))
         .map_err(|e| format!("set_read_timeout: {e}"))?;
@@ -239,7 +255,9 @@ class H(BaseHTTPRequestHandler):
 ThreadingHTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
 "#;
     let script = app_dir.path().join("server.py");
-    tokio::fs::write(&script, py).await.expect("write server.py");
+    tokio::fs::write(&script, py)
+        .await
+        .expect("write server.py");
     let cmd = format!("exec /usr/bin/python3 {}", script.display());
     let manifest = format!(
         "name = \"never-ready\"\ncmd = {cmd:?}\nhealth_check_url = \"/healthz\"\nboot_timeout = 1\n"
@@ -256,12 +274,11 @@ ThreadingHTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
 
     let proxy_port = sandbox.proxy_port;
     let start = Instant::now();
-    let (status_line, _body) = tokio::task::spawn_blocking(move || {
-        http_get(proxy_port, "never-ready.adj.ac", "/")
-    })
-    .await
-    .expect("join")
-    .expect("http_get");
+    let (status_line, _body) =
+        tokio::task::spawn_blocking(move || http_get(proxy_port, "never-ready.adj.ac", "/"))
+            .await
+            .expect("join")
+            .expect("http_get");
     let elapsed = start.elapsed();
 
     assert!(
@@ -438,7 +455,10 @@ async fn idle_timeout_stops_app_after_quiet_period() {
         .await
         .expect("status");
     let out = String::from_utf8_lossy(&status_idle.stdout);
-    assert!(out.contains("stopped"), "expected stopped after idle: {out}");
+    assert!(
+        out.contains("stopped"),
+        "expected stopped after idle: {out}"
+    );
 
     sandbox.stop_daemon().await;
 }

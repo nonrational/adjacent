@@ -46,12 +46,14 @@ mod imp {
     use core_foundation::dictionary::CFDictionary;
     use core_foundation::number::CFNumber;
     use core_foundation::string::CFString;
-    use rcgen::{Error as RcgenError, KeyPair, RemoteKeyPair, SignatureAlgorithm, PKCS_ECDSA_P256_SHA256};
+    use rcgen::{
+        Error as RcgenError, KeyPair, RemoteKeyPair, SignatureAlgorithm, PKCS_ECDSA_P256_SHA256,
+    };
     use security_framework::item::{
         ItemClass, ItemSearchOptions, KeyClass, Limit, Reference, SearchResult,
     };
     use security_framework::key::{Algorithm, SecKey};
-    use security_framework_sys::base::{SecKeyRef};
+    use security_framework_sys::base::SecKeyRef;
     use security_framework_sys::item::{
         kSecAttrIsPermanent, kSecAttrKeySizeInBits, kSecAttrKeyType,
         kSecAttrKeyTypeECSECPrimeRandom, kSecAttrLabel, kSecPrivateKeyAttrs, kSecPublicKeyAttrs,
@@ -107,7 +109,10 @@ mod imp {
         /// not guarantee "sign" success — this gives the doctor a true end-to-end signing probe.
         pub fn sign_canary(&self) -> Result<()> {
             self.private
-                .create_signature(Algorithm::ECDSASignatureMessageX962SHA256, b"adj-doctor-canary")
+                .create_signature(
+                    Algorithm::ECDSASignatureMessageX962SHA256,
+                    b"adj-doctor-canary",
+                )
                 .map(|_| ())
                 .map_err(|e| anyhow!("keychain sign canary failed: {e}"))
         }
@@ -307,6 +312,9 @@ mod imp {
             Err(unsupported())
         }
 
+        // Mirrors the macOS KeychainKey API for symmetry; the non-macOS doctor path never calls
+        // it, so it's dead on these targets.
+        #[allow(dead_code)]
         pub fn sign_canary(&self) -> Result<()> {
             Err(unsupported())
         }

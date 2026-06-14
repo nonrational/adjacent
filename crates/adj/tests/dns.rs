@@ -139,7 +139,10 @@ async fn install_resolver_prints_file_and_sudo_command() {
     assert!(stdout.contains("/etc/resolver/adj.ac"), "{stdout}");
     assert!(stdout.contains("nameserver 127.0.0.1"), "{stdout}");
     // The printed resolver file must carry the configured (sandboxed) port, not the default.
-    assert!(stdout.contains(&format!("port {}", sb.dns_port)), "{stdout}");
+    assert!(
+        stdout.contains(&format!("port {}", sb.dns_port)),
+        "{stdout}"
+    );
     assert!(
         stdout.contains("sudo sh -c 'mkdir -p /etc/resolver && cat > /etc/resolver/adj.ac"),
         "{stdout}"
@@ -157,5 +160,8 @@ async fn uninstall_resolver_prints_removal_command() {
         .expect("run uninstall-resolver");
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("sudo rm -f /etc/resolver/adj.ac"), "{stdout}");
+    assert!(
+        stdout.contains("sudo rm -f /etc/resolver/adj.ac"),
+        "{stdout}"
+    );
 }

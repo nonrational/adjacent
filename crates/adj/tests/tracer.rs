@@ -398,7 +398,9 @@ fn parse_status_port(status_out: &str) -> Option<u16> {
     let marker = "port ";
     let idx = status_out.find(marker)?;
     let tail = &status_out[idx + marker.len()..];
-    let end = tail.find(|c: char| !c.is_ascii_digit()).unwrap_or(tail.len());
+    let end = tail
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(tail.len());
     tail[..end].parse().ok()
 }
 
@@ -410,10 +412,7 @@ async fn port_is_injected_and_visible_in_status() {
     let app_dir = TempDir::new().expect("app dir");
     let port_file = app_dir.path().join("port.txt");
     // Echo $PORT to a file, then block so the child stays running while we inspect status.
-    let cmd = format!(
-        "echo $PORT > {}; sleep 60",
-        port_file.display()
-    );
+    let cmd = format!("echo $PORT > {}; sleep 60", port_file.display());
     write_app(app_dir.path(), "port-demo", &cmd).await;
 
     let add = sandbox
@@ -435,7 +434,12 @@ async fn port_is_injected_and_visible_in_status() {
     assert!(up.status.success(), "up: {:?}", up);
 
     wait_for(
-        || port_file.exists() && std::fs::metadata(&port_file).map(|m| m.len() > 0).unwrap_or(false),
+        || {
+            port_file.exists()
+                && std::fs::metadata(&port_file)
+                    .map(|m| m.len() > 0)
+                    .unwrap_or(false)
+        },
         "child to write its port",
         Duration::from_secs(5),
     )
@@ -504,7 +508,11 @@ async fn port_env_renames_the_injected_variable() {
     assert!(up.status.success(), "up: {:?}", up);
 
     wait_for(
-        || std::fs::metadata(&env_dump).map(|m| m.len() > 0).unwrap_or(false),
+        || {
+            std::fs::metadata(&env_dump)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
+        },
         "child to write env dump",
         Duration::from_secs(5),
     )
@@ -598,9 +606,9 @@ async fn two_supervised_apps_get_distinct_ports() {
 
     wait_for(
         || {
-            [&port_a, &port_b].iter().all(|p| {
-                std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false)
-            })
+            [&port_a, &port_b]
+                .iter()
+                .all(|p| std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false))
         },
         "both children to write port files",
         Duration::from_secs(5),
@@ -688,7 +696,11 @@ async fn env_table_values_reach_child() {
     add_and_up(&sandbox, app_dir.path(), "env-table").await;
 
     wait_for(
-        || std::fs::metadata(&dump).map(|m| m.len() > 0).unwrap_or(false),
+        || {
+            std::fs::metadata(&dump)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
+        },
         "child to write env dump",
         Duration::from_secs(5),
     )
@@ -736,7 +748,11 @@ async fn env_file_values_reach_child() {
     add_and_up(&sandbox, app_dir.path(), "env-file").await;
 
     wait_for(
-        || std::fs::metadata(&dump).map(|m| m.len() > 0).unwrap_or(false),
+        || {
+            std::fs::metadata(&dump)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
+        },
         "child to write env dump",
         Duration::from_secs(5),
     )
@@ -778,7 +794,11 @@ async fn env_table_wins_over_env_file_on_collision() {
     add_and_up(&sandbox, app_dir.path(), "collision").await;
 
     wait_for(
-        || std::fs::metadata(&dump).map(|m| m.len() > 0).unwrap_or(false),
+        || {
+            std::fs::metadata(&dump)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
+        },
         "child to write env dump",
         Duration::from_secs(5),
     )
@@ -823,7 +843,11 @@ async fn port_injection_wins_over_env_sources() {
     add_and_up(&sandbox, app_dir.path(), "port-wins").await;
 
     wait_for(
-        || std::fs::metadata(&dump).map(|m| m.len() > 0).unwrap_or(false),
+        || {
+            std::fs::metadata(&dump)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
+        },
         "child to write env dump",
         Duration::from_secs(5),
     )
@@ -977,7 +1001,11 @@ async fn env_file_resolves_relative_to_app_path() {
     add_and_up(&sandbox, app_dir.path(), "rel-envfile").await;
 
     wait_for(
-        || std::fs::metadata(&dump).map(|m| m.len() > 0).unwrap_or(false),
+        || {
+            std::fs::metadata(&dump)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
+        },
         "child to write env dump",
         Duration::from_secs(5),
     )

@@ -88,7 +88,11 @@ fn build_response(query: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let qdcount = u16::from_be_bytes([query[4], query[5]]);
-    let parsed = if qdcount == 1 { parse_question(query) } else { None };
+    let parsed = if qdcount == 1 {
+        parse_question(query)
+    } else {
+        None
+    };
     let Some((name, qtype, qclass, question_end)) = parsed else {
         return Some(header_only_response(query, flags, RCODE_FORMERR));
     };
@@ -170,8 +174,12 @@ pub fn install_resolver() -> Result<()> {
 
     println!("# Adjacent resolver installer");
     println!("#");
-    println!("# *.{ZONE} normally resolves via public DNS, which fails offline. This resolver hook");
-    println!("# routes {ZONE} queries to the daemon's local DNS server on 127.0.0.1:{port} instead.");
+    println!(
+        "# *.{ZONE} normally resolves via public DNS, which fails offline. This resolver hook"
+    );
+    println!(
+        "# routes {ZONE} queries to the daemon's local DNS server on 127.0.0.1:{port} instead."
+    );
     println!("# Adjacent never escalates — review and run these manually.");
     println!();
     println!("# 1. Resolver file ({path}):");
@@ -240,7 +248,10 @@ mod tests {
         assert!(resp[2] & 0x80 != 0, "QR bit set");
         assert_eq!(rcode(&resp), 0);
         assert_eq!(ancount(&resp), 1);
-        assert!(resp.ends_with(&[0, 4, 127, 0, 0, 1]), "A rdata is 127.0.0.1");
+        assert!(
+            resp.ends_with(&[0, 4, 127, 0, 0, 1]),
+            "A rdata is 127.0.0.1"
+        );
     }
 
     #[test]
