@@ -277,7 +277,17 @@ async fn handle(
     // for the duration of `idle_timeout` doesn't get spuriously stopped mid-stream.
     supervisor.touch_idle(&name).await;
 
-    match forward(req, upstream_port, &raw_host, client_ip, proto).await {
+    match forward(
+        req,
+        upstream_port,
+        &name,
+        &raw_host,
+        client_ip,
+        proto,
+        supervisor,
+    )
+    .await
+    {
         Ok(resp) => resp,
         Err(err) => {
             tracing::warn!("proxy forward to `{name}:{upstream_port}` failed: {err}");
@@ -372,9 +382,11 @@ pub fn boot_timeout_for(cfg: &AppConfig) -> Duration {
 async fn forward(
     mut req: Request<Incoming>,
     upstream_port: u16,
+    name: &str,
     original_host: &str,
     client_ip: IpAddr,
     proto: &'static str,
+    supervisor: Arc<Supervisor>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>> {
     // Capture the downstream upgrade handle BEFORE the request is consumed by send_request.
     // hyper stores it as a request extension; taking it here (rather than after the response)
@@ -432,6 +444,7 @@ async fn forward(
     if resp.status() == StatusCode::SWITCHING_PROTOCOLS {
         if let Some(downstream) = downstream_upgrade {
             let upstream = hyper::upgrade::on(&mut resp);
+            let name = name.to_string();
             tokio::spawn(async move {
                 let (down, up) = match tokio::join!(downstream, upstream) {
                     (Ok(d), Ok(u)) => (d, u),
@@ -446,15 +459,62 @@ async fn forward(
                 };
                 let mut down = TokioIo::new(down);
                 let mut up = TokioIo::new(up);
-                if let Err(err) = tokio::io::copy_bidirectional(&mut down, &mut up).await {
-                    tracing::debug!("upgraded tunnel closed: {err}");
-                }
+                run_tunnel(&mut down, &mut up, &name, &supervisor).await;
             });
         }
     }
 
     let (parts, body) = resp.into_parts();
     Ok(Response::from_parts(parts, body.boxed()))
+}
+
+/// Pump bytes both ways across an upgraded tunnel, keeping the app's idle clock fresh while the
+/// tunnel is open. HMR ping/pong frames ride *inside* this tunnel, so they never reach the
+/// proxy's per-request `touch_idle` — without a heartbeat here a quiet-but-connected dev session
+/// looks idle to the scanner and gets SIGTERM'd mid-session, then HMR reconnects and the cycle
+/// repeats every `idle_timeout` (issue #61). We treat "tunnel open" as "in use" and touch on a
+/// cadence well under the window, plus once more on close so the idle clock restarts from session
+/// end rather than session start. Apps with idle shutdown off get no heartbeat.
+async fn run_tunnel<A, B>(down: &mut A, up: &mut B, name: &str, supervisor: &Supervisor)
+where
+    A: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let copy = tokio::io::copy_bidirectional(down, up);
+    tokio::pin!(copy);
+    match supervisor.idle_window(name).await {
+        Some(window) => {
+            let mut ticker = tokio::time::interval(heartbeat_interval(window));
+            // The first tick fires immediately; the request that opened this tunnel already
+            // touched the clock, so drop it and let the rest pace the heartbeat.
+            ticker.tick().await;
+            loop {
+                tokio::select! {
+                    result = &mut copy => {
+                        if let Err(err) = result {
+                            tracing::debug!("upgraded tunnel closed: {err}");
+                        }
+                        break;
+                    }
+                    _ = ticker.tick() => supervisor.touch_idle(name).await,
+                }
+            }
+        }
+        None => {
+            if let Err(err) = copy.await {
+                tracing::debug!("upgraded tunnel closed: {err}");
+            }
+        }
+    }
+    // Restart the idle clock from session end (a no-op once the app is no longer running).
+    supervisor.touch_idle(name).await;
+}
+
+/// Idle-touch cadence for an open tunnel: a quarter of the app's idle window so the scanner never
+/// observes the app cross its threshold, clamped so tiny windows stay cheap-but-correct and the
+/// 15m default doesn't wait minutes between touches.
+fn heartbeat_interval(window: Duration) -> Duration {
+    (window / 4).clamp(Duration::from_millis(500), Duration::from_secs(60))
 }
 
 /// Set `X-Forwarded-Host` / `X-Forwarded-For` / `X-Forwarded-Proto` on the upstream request.
@@ -545,6 +605,25 @@ fn error_response(status: StatusCode, message: &str) -> Response<BoxBody<Bytes, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heartbeat_interval_clamps_to_window_quarter() {
+        // Mid-range: a quarter of the window, comfortably under it so the scanner never trips.
+        assert_eq!(
+            heartbeat_interval(Duration::from_secs(40)),
+            Duration::from_secs(10)
+        );
+        // Tiny windows (test configs) floor at 500ms — still well under a 2s window.
+        assert_eq!(
+            heartbeat_interval(Duration::from_secs(2)),
+            Duration::from_millis(500)
+        );
+        // The 15m default caps at 60s rather than waiting ~3.75m between touches.
+        assert_eq!(
+            heartbeat_interval(Duration::from_secs(15 * 60)),
+            Duration::from_secs(60)
+        );
+    }
 
     #[test]
     fn strips_optional_port_suffix() {
