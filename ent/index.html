@@ -69,7 +69,7 @@
     .statement .cta { margin-top: 0.75rem; }
 
     .cmds { max-width: 820px; counter-reset: step; }
-    .cmd { display: block; background: var(--panel); border: 1px solid var(--rule); border-left: 2px solid var(--accent-dim); padding: 0.85rem 1.25rem; margin-bottom: 0.75rem; color: var(--paper); font-size: 14px; counter-increment: step; position: relative; }
+    .cmd { display: block; background: var(--panel); border: 1px solid var(--rule); border-left: 2px solid var(--accent-dim); padding: 0.85rem 1.25rem; margin-bottom: 0.75rem; color: var(--paper); font-size: 14px; counter-increment: step; position: relative; overflow-wrap: anywhere; }
     .cmd::after { content: '0' counter(step); position: absolute; top: 0.85rem; right: 1.25rem; font-size: 11px; color: var(--dim); letter-spacing: 0.15em; }
     .cmd .prompt { color: var(--accent); user-select: none; margin-right: 0.6rem; }
     .cmd .note { display: block; color: var(--soft); font-size: 12px; margin-top: 0.2rem; }
@@ -166,9 +166,17 @@
       </div>
     </section>
 
+    <section>
+      <div class="label">install &middot; alpha</div>
+      <div class="cmds">
+        <code class="cmd"><span class="prompt">$</span>brew tap nonrational/adjacent https://github.com/nonrational/adjacent<span class="note"># straight from the repo &mdash; no separate tap</span></code>
+        <code class="cmd"><span class="prompt">$</span>brew install adjacent<span class="note"># Apple Silicon, unsigned alpha build</span></code>
+      </div>
+    </section>
+
     <section class="closing">
       <div class="label">status</div>
-      <p class="status-line">Coming soon to a terminal near you.</p>
+      <p class="status-line">The alpha is live &mdash; Apple Silicon, unsigned, rough edges.</p>
       <a class="cta" href="https://github.com/nonrational/adjacent">Built in public &mdash; follow along on GitHub<span class="arrow">&rarr;</span></a>
       <p class="facts">Rust &middot; macOS &middot; open source</p>
     </section>

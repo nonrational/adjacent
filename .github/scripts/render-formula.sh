@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Render the Homebrew formula for a prebuilt arm64 alpha build to stdout.
-# Single source of truth for Formula/adj.rb — the release workflow renders this and commits the
+# Single source of truth for Formula/adjacent.rb — the release workflow renders this and commits the
 # result; run it locally to lint the output before tagging.
 #
 # Usage: render-formula.sh <version> <sha256> [owner/repo]
@@ -16,7 +16,7 @@ tag="v${version}"
 url="https://github.com/${repo}/releases/download/${tag}/adj-${version}-aarch64-apple-darwin.tar.gz"
 
 cat <<RUBY
-class Adj < Formula
+class Adjacent < Formula
   desc "Local dev-server harness so a human and an agent share one supervised server"
   homepage "https://adj.ac/ent"
   version "${version}"
@@ -47,7 +47,7 @@ class Adj < Formula
         adj install-port-forward  # route :80/:443 to the daemon
         adj install-ca            # opt-in local HTTPS CA; run it from this binary
 
-      HTTPS note: each 'brew upgrade adj' replaces the binary and invalidates the CA
+      HTTPS note: each 'brew upgrade adjacent' replaces the binary and invalidates the CA
       keychain ACL. Repair it with: adj install-ca --reset && adj install-ca
     EOS
   end

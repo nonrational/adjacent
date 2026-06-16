@@ -61,7 +61,7 @@ jobs:
           sha256="${{ steps.pkg.outputs.sha256 }}"
           git fetch origin main
           git checkout -B main origin/main
-          bash .github/scripts/render-formula.sh "$version" "$sha256" "$GITHUB_REPOSITORY" > Formula/adj.rb
-          git add Formula/adj.rb
+          bash .github/scripts/render-formula.sh "$version" "$sha256" "$GITHUB_REPOSITORY" > Formula/adjacent.rb
+          git add Formula/adjacent.rb
           git commit -m "Update Homebrew formula for ${GITHUB_REF_NAME}" || { echo "formula unchanged"; exit 0; }
           git push origin main
