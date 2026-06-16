@@ -190,34 +190,13 @@ impl Supervisor {
             let mut guard = inner_handle.lock().await;
             if let Some(rt) = guard.apps.get_mut(&watch_name) {
                 let intentional = rt.intentional_stop;
-                match status {
-                    Ok(s) => {
-                        let code = s.code().unwrap_or_else(|| {
-                            // signal-terminated processes have no exit code; surface 128+signal style
-                            #[cfg(unix)]
-                            {
-                                use std::os::unix::process::ExitStatusExt;
-                                s.signal().map(|sig| 128 + sig).unwrap_or(-1)
-                            }
-                            #[cfg(not(unix))]
-                            {
-                                -1
-                            }
-                        });
-                        rt.state = if intentional || code == 0 {
-                            AppState::Stopped
-                        } else {
-                            AppState::Crashed { exit_code: code }
-                        };
-                    }
-                    Err(_) => {
-                        rt.state = if intentional {
-                            AppState::Stopped
-                        } else {
-                            AppState::Crashed { exit_code: -1 }
-                        };
-                    }
-                }
+                // A failed `wait()` (rare) and a signal/exit with no code both collapse to -1.
+                let code = status.map(|s| exit_code_of(&s)).unwrap_or(-1);
+                rt.state = if intentional || code == 0 {
+                    AppState::Stopped
+                } else {
+                    AppState::Crashed { exit_code: code }
+                };
                 // Reset the flag so a subsequent crash (no `down`) reports Crashed correctly.
                 rt.intentional_stop = false;
             }
@@ -559,4 +538,20 @@ fn allocate_free_port(reserved: &HashSet<u16>) -> Result<u16> {
         "could not find a free port not already reserved by Adjacent after {} attempts",
         PORT_ALLOC_ATTEMPTS
     ))
+}
+
+// Signal-terminated processes carry no exit code, so we surface them as `128 + signal` (the
+// shell convention) and fall back to -1 when neither a code nor a signal is available.
+#[cfg(unix)]
+fn exit_code_of(status: &std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    status
+        .code()
+        .or_else(|| status.signal().map(|sig| 128 + sig))
+        .unwrap_or(-1)
+}
+
+#[cfg(not(unix))]
+fn exit_code_of(status: &std::process::ExitStatus) -> i32 {
+    status.code().unwrap_or(-1)
 }

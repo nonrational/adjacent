@@ -209,18 +209,19 @@ pub async fn logs(name: String, tail: bool, json: bool) -> Result<()> {
             ));
         }
     }
-    match (tail, json) {
-        (false, false) => print_file_plain(&path).await,
-        (true, false) => tail_file_plain(&path).await,
-        (false, true) => print_file_json(&path).await,
-        (true, true) => tail_file_json(&path).await,
+    if json {
+        stream_json(&path, tail).await
+    } else {
+        stream_plain(&path, tail).await
     }
 }
 
 // In plain-text mode we project each JSONL record's `line` field. Lines that don't parse
 // (e.g. legacy logs written before this slice landed) are passed through verbatim so users
-// don't lose data during the transition.
-async fn print_file_plain(path: &Path) -> Result<()> {
+// don't lose data during the transition. With `follow`, EOF means "wait for more" instead of
+// "done" — the read loop below is the same either way, so tail naturally drains the existing
+// file before it starts polling.
+async fn stream_plain(path: &Path, follow: bool) -> Result<()> {
     let file = File::open(path)
         .await
         .with_context(|| format!("opening {}", path.display()))?;
@@ -231,56 +232,24 @@ async fn print_file_plain(path: &Path) -> Result<()> {
         line.clear();
         let n = reader.read_line(&mut line).await?;
         if n == 0 {
-            break;
+            stdout.flush().await?;
+            if !follow {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            continue;
         }
         emit_plain_line(&line, &mut stdout).await?;
-    }
-    stdout.flush().await?;
-    Ok(())
-}
-
-async fn tail_file_plain(path: &Path) -> Result<()> {
-    let file = File::open(path)
-        .await
-        .with_context(|| format!("opening {}", path.display()))?;
-    let mut reader = BufReader::new(file);
-    let mut stdout = tokio::io::stdout();
-    let mut line = String::new();
-    loop {
-        line.clear();
-        match reader.read_line(&mut line).await? {
-            0 => {
-                stdout.flush().await?;
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-            _ => {
-                emit_plain_line(&line, &mut stdout).await?;
-                stdout.flush().await?;
-            }
+        if follow {
+            stdout.flush().await?;
         }
     }
 }
 
 // In JSON mode we stream the file's contents as-is. The supervisor already writes valid
-// JSONL records, so callers can pipe directly into `jq` or any JSONL parser.
-async fn print_file_json(path: &Path) -> Result<()> {
-    let mut file = File::open(path)
-        .await
-        .with_context(|| format!("opening {}", path.display()))?;
-    let mut stdout = tokio::io::stdout();
-    let mut buf = vec![0u8; 8192];
-    loop {
-        let n = file.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        stdout.write_all(&buf[..n]).await?;
-    }
-    stdout.flush().await?;
-    Ok(())
-}
-
-async fn tail_file_json(path: &Path) -> Result<()> {
+// JSONL records, so callers can pipe directly into `jq` or any JSONL parser. `follow` has the
+// same drain-then-poll semantics as the plain path.
+async fn stream_json(path: &Path, follow: bool) -> Result<()> {
     let mut file = File::open(path)
         .await
         .with_context(|| format!("opening {}", path.display()))?;
@@ -290,11 +259,16 @@ async fn tail_file_json(path: &Path) -> Result<()> {
         let n = file.read(&mut buf).await?;
         if n == 0 {
             stdout.flush().await?;
+            if !follow {
+                return Ok(());
+            }
             tokio::time::sleep(Duration::from_millis(200)).await;
             continue;
         }
         stdout.write_all(&buf[..n]).await?;
-        stdout.flush().await?;
+        if follow {
+            stdout.flush().await?;
+        }
     }
 }
 

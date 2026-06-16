@@ -31,7 +31,7 @@ pub async fn run() -> Result<()> {
     paths::ensure_dirs()?;
     let socket = paths::socket_path()?;
     if socket.exists() {
-        if probe_existing_daemon(&socket).await {
+        if socket_is_live(&socket).await {
             return Err(anyhow!(
                 "another adj daemon is already listening at {}",
                 socket.display()
@@ -122,19 +122,17 @@ pub async fn run() -> Result<()> {
     }
 }
 
-async fn probe_existing_daemon(socket: &PathBuf) -> bool {
+// Liveness check, not a request/response round-trip: a successful connect plus a successful
+// write to the control socket is enough to know another daemon owns it. We deliberately don't
+// read a reply — a wedged daemon that accepts the connection but never answers shouldn't be
+// able to hang our startup. A connect failure means the socket file is stale (no listener), so
+// the caller is clear to remove it and bind.
+async fn socket_is_live(socket: &PathBuf) -> bool {
     match UnixStream::connect(socket).await {
         Ok(mut s) => {
             let req = Request::Ping;
             let bytes = serde_json::to_vec(&req).unwrap_or_default();
-            if s.write_all(&bytes).await.is_err() {
-                return false;
-            }
-            if s.write_all(b"\n").await.is_err() {
-                return false;
-            }
-            // We don't care about the response; presence means another daemon is alive.
-            true
+            s.write_all(&bytes).await.is_ok() && s.write_all(b"\n").await.is_ok()
         }
         Err(_) => false,
     }
