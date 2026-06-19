@@ -72,6 +72,17 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Report runtime metrics for an app: per-route latency/throughput/errors and a process
+    /// resource summary, over a rolling in-memory window.
+    Stats {
+        name: String,
+        /// Emit the stable `StatsDto` JSON object instead of the human table.
+        #[arg(long)]
+        json: bool,
+        /// Narrow the window, e.g. `30s`, `5m`, `1h`. Defaults to the full window.
+        #[arg(long, default_value = "0")]
+        since: String,
+    },
     /// Print the log file for an app.
     Logs {
         name: String,
@@ -127,6 +138,7 @@ async fn main() -> ExitCode {
         Cmd::Remove { name } => client::remove(name).await,
         Cmd::Prune => client::prune().await,
         Cmd::Status { name, json } => client::status(name, json).await,
+        Cmd::Stats { name, json, since } => client::stats(name, json, since).await,
         Cmd::Logs { name, tail, json } => client::logs(name, tail, json).await,
         Cmd::WaitReady { name, timeout } => client::wait_ready(name, timeout).await,
         Cmd::AgentInstructions { path } => agent_docs::emit(path),
