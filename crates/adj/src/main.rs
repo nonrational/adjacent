@@ -8,6 +8,7 @@ mod daemon;
 mod doctor;
 mod env;
 mod installca;
+mod metrics;
 mod paths;
 mod portforward;
 mod proxy;
