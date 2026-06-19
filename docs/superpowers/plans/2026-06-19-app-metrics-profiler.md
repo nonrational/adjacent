@@ -1087,8 +1087,10 @@ In `crates/adj/src/metrics/sampler.rs`, append:
 mod macos {
     use super::{ProcSampler, RawProc};
     use libproc::libproc::bsd_info::BSDInfo;
+    use libproc::libproc::file_info::ListFDs;
     use libproc::libproc::pid_rusage::{pidrusage, RUsageInfoV2};
-    use libproc::libproc::proc_pid::{listpids, pidinfo, ProcType};
+    use libproc::libproc::proc_pid::{listpidinfo, listpids, pidinfo, ProcType};
+    use libproc::libproc::task_info::TaskInfo;
 
     pub struct MacSampler;
 
@@ -1105,17 +1107,24 @@ mod macos {
             let pids = listpids(ProcType::ProcAllPIDS).ok()?;
             for pid in pids {
                 let pid = pid as i32;
-                let Ok(info) = pidinfo::<BSDInfo>(pid, 0) else { continue };
-                if info.pbi_pgid as i32 != pgid {
+                let Ok(bsd) = pidinfo::<BSDInfo>(pid, 0) else {
+                    continue;
+                };
+                if bsd.pbi_pgid as i32 != pgid {
                     continue;
                 }
                 found = true;
                 if let Ok(ru) = pidrusage::<RUsageInfoV2>(pid) {
-                    // ri_user_time / ri_system_time are nanoseconds; RSS is bytes.
+                    // ri_user_time / ri_system_time are nanoseconds; ri_resident_size is bytes.
                     acc.cpu_time_ms += (ru.ri_user_time + ru.ri_system_time) / 1_000_000;
                     acc.rss_bytes += ru.ri_resident_size;
                 }
-                acc.threads += info.pbi_nfiles_dummy_unused_keep_zero(); // see Step 4 note
+                if let Ok(task) = pidinfo::<TaskInfo>(pid, 0) {
+                    acc.threads += task.pti_threadnum.max(0) as u64;
+                }
+                if let Ok(fds) = listpidinfo::<ListFDs>(pid, 4096) {
+                    acc.fds += fds.len() as u64;
+                }
             }
             found.then_some(acc)
         }
@@ -1123,7 +1132,7 @@ mod macos {
 }
 ```
 
-> **Step 4 note / known confirm-on-Mac points:** the exact `BSDInfo` field for thread count and the call for fd count vary across `libproc` versions. On macOS, confirm and finish two lines: (a) thread count — `BSDInfo` does not expose threads directly; use `pidinfo::<libproc::libproc::task_info::TaskInfo>(pid, 0)?.pti_threadnum`; (b) fd count — use `libproc::libproc::proc_pid::listpidinfo::<libproc::libproc::file_info::ListFDs>(pid, max)` and take its length. Replace the `acc.threads += ...` line accordingly and add the fd accumulation. These are real, bounded edits with concrete APIs — make them while the compiler and a Mac are in front of you.
+> **Verification:** this module is `#[cfg(target_os = "macos")]`, so it is never compiled by the Linux build, local `cargo build`, or local `cargo clippy` — and `libproc` runs `bindgen` against the macOS SDK headers at build time, so even a cross-`cargo check` to `aarch64-apple-darwin` can't compile it on Linux. The `macos-14` CI leg is the verifier. The `listpids`/`pidinfo`/`listpidinfo` signatures and `ProcType::ProcAllPIDS` are confirmed against libproc 0.14 source; `pbi_pgid` (BSDInfo), `pti_threadnum` (TaskInfo), and `ri_user_time`/`ri_system_time`/`ri_resident_size` (RUsageInfoV2) are the macOS SDK struct field names libproc re-exports. If a field/type mismatch surfaces on the macOS CI leg, it's a localized fix in this module.
 
 - [ ] **Step 3: Build on the dev host (confirms macOS code is gated out when not on macOS)**
 
