@@ -881,6 +881,7 @@ CI's test matrix is `[ubuntu-latest, macos-14]` (see `.github/workflows/ci.yml`)
 
 **Files:**
 - Modify: `crates/adj/src/metrics/sampler.rs`
+- Modify: `Cargo.toml` (workspace) — add `"feature"` to the `nix` features so `sysconf`/`SysconfVar` are available: `nix = { version = "0.29", features = ["signal", "process", "feature"] }`.
 
 - [ ] **Step 1: Write the failing test (implementation included)**
 
@@ -1040,9 +1041,9 @@ mod linux_tests {
     #[test]
     fn absent_group_returns_none() {
         let mut sampler = linux::LinuxSampler;
-        // pgid 0 means "the caller's group" to many syscalls, but as a literal /proc pgrp match
-        // no process reports pgrp 0, so this reads as an absent group.
-        assert!(sampler.sample(0).is_none());
+        // i32::MAX is not a real process-group id, so no /proc entry reports it as its pgrp and
+        // the scan finds nothing. (pgid 0 would be wrong: kernel threads report pgrp 0.)
+        assert!(sampler.sample(i32::MAX).is_none());
     }
 }
 ```
