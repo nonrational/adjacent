@@ -133,6 +133,57 @@ mod linux {
     }
 }
 
+// macOS path. Not compiled on Linux (so it's invisible to the Linux build and to local
+// `cargo build`/`clippy`); it is compiled and exercised on the `macos-14` CI leg, which is the
+// verifier for this module. Sums resource usage across every pid in the target process group.
+#[cfg(target_os = "macos")]
+mod macos {
+    use super::{ProcSampler, RawProc};
+    use libproc::libproc::bsd_info::BSDInfo;
+    use libproc::libproc::file_info::ListFDs;
+    use libproc::libproc::pid_rusage::{pidrusage, RUsageInfoV2};
+    use libproc::libproc::proc_pid::{listpidinfo, listpids, pidinfo, ProcType};
+    use libproc::libproc::task_info::TaskInfo;
+
+    pub struct MacSampler;
+
+    impl ProcSampler for MacSampler {
+        fn sample(&mut self, pgid: i32) -> Option<RawProc> {
+            let mut acc = RawProc {
+                cpu_time_ms: 0,
+                rss_bytes: 0,
+                threads: 0,
+                fds: 0,
+            };
+            let mut found = false;
+            // Enumerate every pid, keep those whose BSD info reports our target process group.
+            let pids = listpids(ProcType::ProcAllPIDS).ok()?;
+            for pid in pids {
+                let pid = pid as i32;
+                let Ok(bsd) = pidinfo::<BSDInfo>(pid, 0) else {
+                    continue;
+                };
+                if bsd.pbi_pgid as i32 != pgid {
+                    continue;
+                }
+                found = true;
+                if let Ok(ru) = pidrusage::<RUsageInfoV2>(pid) {
+                    // ri_user_time / ri_system_time are nanoseconds; ri_resident_size is bytes.
+                    acc.cpu_time_ms += (ru.ri_user_time + ru.ri_system_time) / 1_000_000;
+                    acc.rss_bytes += ru.ri_resident_size;
+                }
+                if let Ok(task) = pidinfo::<TaskInfo>(pid, 0) {
+                    acc.threads += task.pti_threadnum.max(0) as u64;
+                }
+                if let Ok(fds) = listpidinfo::<ListFDs>(pid, 4096) {
+                    acc.fds += fds.len() as u64;
+                }
+            }
+            found.then_some(acc)
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[cfg(test)]
 mod linux_tests {
