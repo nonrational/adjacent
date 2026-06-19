@@ -205,6 +205,10 @@ async fn dispatch(
         }
         Request::Remove { name } => remove(name, supervisor, registry_lock, resolver).await,
         Request::Prune => prune(supervisor, registry_lock, resolver).await,
+        // Temporary stub so the exhaustive match compiles now that the protocol carries
+        // `Request::Stats`. The real handler (threading `Arc<Metrics>`) replaces this in the
+        // proxy/dispatch wiring task.
+        Request::Stats { .. } => Err(anyhow!("stats: not yet implemented")),
     }
 }
 
