@@ -528,10 +528,11 @@ pub struct RequestRecord {
     pub latency_ms: u64,
 }
 
+// Per-route aggregate. The request count is the histogram's count (every record bumps the
+// histogram), so we don't track a redundant counter — `hist.count()` is the single source.
 #[derive(Default)]
 struct RouteAgg {
     hist: Histogram,
-    count: u64,
     s2xx: u64,
     s3xx: u64,
     s4xx: u64,
@@ -541,7 +542,6 @@ struct RouteAgg {
 impl RouteAgg {
     fn record(&mut self, status: u16, latency_ms: u64) {
         self.hist.record(latency_ms);
-        self.count += 1;
         match status / 100 {
             2 => self.s2xx += 1,
             3 => self.s3xx += 1,
@@ -553,7 +553,6 @@ impl RouteAgg {
 
     fn merge(&mut self, other: &RouteAgg) {
         self.hist.merge(&other.hist);
-        self.count += other.count;
         self.s2xx += other.s2xx;
         self.s3xx += other.s3xx;
         self.s4xx += other.s4xx;
@@ -663,7 +662,7 @@ impl Metrics {
             .into_iter()
             .map(|(route, agg)| RouteStatDto {
                 route,
-                count: agg.count,
+                count: agg.hist.count(),
                 latency_ms: LatencyDto {
                     p50: agg.hist.percentile(0.50),
                     p95: agg.hist.percentile(0.95),
