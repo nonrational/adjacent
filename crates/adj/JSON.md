@@ -113,6 +113,60 @@ The process keeps reading until interrupted (`Ctrl-C`), exactly like `--tail` wi
 adj logs site --tail --json | jq -r 'select(.stream == "stderr") | .line'
 ```
 
+## `adj stats <name> --json`
+
+A single JSON object describing the rolling in-memory metrics window for one app. The window is
+30 minutes; `--since <dur>` narrows it. The `process` field is present only when the app is
+running, has a fresh sample, and the platform supports process sampling.
+
+```json
+{
+  "name": "site",
+  "window_secs": 1800,
+  "total_requests": 1240,
+  "routes": [
+    {
+      "route": "GET /users/:id",
+      "count": 980,
+      "latency_ms": { "p50": 8, "p95": 128, "p99": 256, "max": 412 },
+      "status_2xx": 970,
+      "status_3xx": 0,
+      "status_4xx": 10,
+      "status_5xx": 0
+    }
+  ],
+  "slowest_raw": [
+    { "method": "GET", "path": "/users/42", "status": 200, "latency_ms": 412 }
+  ],
+  "process": {
+    "cpu_pct": 38.0,
+    "rss_bytes": 536870912,
+    "threads": 24,
+    "fds": 180,
+    "sampled_at": "2026-06-19T18:23:11Z"
+  }
+}
+```
+
+| Field            | Type   | When                                                        |
+|------------------|--------|-------------------------------------------------------------|
+| `name`           | string | always                                                      |
+| `window_secs`    | number | always; seconds of history covered                          |
+| `total_requests` | number | always; sum of route counts in the window                   |
+| `routes`         | array  | always; one entry per templated route, busiest first        |
+| `slowest_raw`    | array  | always; slowest individual raw paths in the window (≤ 10)    |
+| `process`        | object | present iff a fresh process sample exists for a running app  |
+
+Each route entry carries `route` (string), `count` (number), `latency_ms` (object with `p50` /
+`p95` / `p99` / `max` in milliseconds), and `status_2xx` / `status_3xx` / `status_4xx` /
+`status_5xx` (numbers). The `process` object carries `cpu_pct` (number), `rss_bytes` (number),
+`threads` (number), `fds` (number), and `sampled_at` (RFC3339 UTC string).
+
+Route latency values are histogram bucket upper bounds — honest over-estimates, never under-
+reported. Path segments that look like IDs (digits, UUIDs, long hashes) collapse to `:id` so
+route cardinality stays bounded; the original paths survive in `slowest_raw`. `process.cpu_pct`
+is whole-process-group CPU and is not attributable to any single route.
+
 ## Versioning
 
 This schema is the v1 contract. Additions (new optional fields) are non-breaking. Removals
