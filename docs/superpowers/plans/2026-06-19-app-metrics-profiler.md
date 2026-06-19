@@ -1523,7 +1523,7 @@ async fn handle_client(
     let response = match dispatch(req, supervisor, registry_lock, resolver, metrics).await {
 ```
 
-Update `dispatch`'s signature, add the `Stats` arm:
+Update `dispatch`'s signature, add the `Stats` arm. (Task 1 left a temporary `Request::Stats { .. } => Err(anyhow!("stats: not yet implemented"))` stub arm here so the crate kept compiling — replace the whole `match req` block below, which removes the stub.)
 
 ```rust
 async fn dispatch(

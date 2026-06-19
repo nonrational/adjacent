@@ -270,8 +270,8 @@ mod stats_tests {
                 latency_ms: LatencyDto {
                     p50: 8,
                     p95: 128,
-                    p99: 128,
-                    max: 91,
+                    p99: 256,
+                    max: 412,
                 },
                 status_2xx: 2,
                 status_3xx: 0,
@@ -282,7 +282,7 @@ mod stats_tests {
                 method: "GET".into(),
                 path: "/users/42".into(),
                 status: 200,
-                latency_ms: 91,
+                latency_ms: 412,
             }],
             process: None,
         };
