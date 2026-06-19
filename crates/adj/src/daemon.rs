@@ -66,8 +66,9 @@ pub async fn run() -> Result<()> {
     // Reverse proxy runs in the same process as the control-plane listener; failures here are
     // logged but don't kill the daemon — the control plane is still useful without the proxy.
     let proxy_supervisor = supervisor.clone();
+    let proxy_metrics = metrics.clone();
     tokio::spawn(async move {
-        if let Err(err) = proxy::run(proxy_supervisor).await {
+        if let Err(err) = proxy::run(proxy_supervisor, proxy_metrics).await {
             tracing::error!("proxy listener exited: {err}");
         }
     });
@@ -89,11 +90,12 @@ pub async fn run() -> Result<()> {
     {
         let cell = resolver.clone();
         let https_supervisor = supervisor.clone();
+        let https_metrics = metrics.clone();
         tokio::spawn(async move {
             match tls::LeafResolver::new() {
                 Ok(r) => {
                     let _ = cell.set(r.clone());
-                    if let Err(err) = proxy::run_https(https_supervisor, r).await {
+                    if let Err(err) = proxy::run_https(https_supervisor, https_metrics, r).await {
                         tracing::error!("https listener exited: {err}");
                     }
                 }
@@ -127,8 +129,9 @@ pub async fn run() -> Result<()> {
         let sup = supervisor.clone();
         let reg_lock = registry_lock.clone();
         let resolver = resolver.clone();
+        let metrics = metrics.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle_client(stream, sup, reg_lock, resolver).await {
+            if let Err(err) = handle_client(stream, sup, reg_lock, resolver, metrics).await {
                 tracing::warn!("client handler error: {err}");
             }
         });
@@ -158,6 +161,7 @@ async fn handle_client(
     supervisor: Arc<Supervisor>,
     registry_lock: Arc<Mutex<()>>,
     resolver: Arc<std::sync::OnceLock<Arc<tls::LeafResolver>>>,
+    metrics: Arc<Metrics>,
 ) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -177,7 +181,7 @@ async fn handle_client(
         }
     };
 
-    let response = match dispatch(req, supervisor, registry_lock, resolver).await {
+    let response = match dispatch(req, supervisor, registry_lock, resolver, metrics).await {
         Ok(r) => r,
         Err(err) => Response::Error {
             message: format!("{err}"),
@@ -203,6 +207,7 @@ async fn dispatch(
     supervisor: Arc<Supervisor>,
     registry_lock: Arc<Mutex<()>>,
     resolver: Arc<std::sync::OnceLock<Arc<tls::LeafResolver>>>,
+    metrics: Arc<Metrics>,
 ) -> Result<Response> {
     match req {
         Request::Ping => Ok(Response::Ok),
@@ -218,10 +223,7 @@ async fn dispatch(
         }
         Request::Remove { name } => remove(name, supervisor, registry_lock, resolver).await,
         Request::Prune => prune(supervisor, registry_lock, resolver).await,
-        // Temporary stub so the exhaustive match compiles now that the protocol carries
-        // `Request::Stats`. The real handler (threading `Arc<Metrics>`) replaces this in the
-        // proxy/dispatch wiring task.
-        Request::Stats { .. } => Err(anyhow!("stats: not yet implemented")),
+        Request::Stats { name, since_secs } => stats(name, since_secs, metrics).await,
     }
 }
 
@@ -500,6 +502,17 @@ async fn status(name: String, supervisor: Arc<Supervisor>) -> Result<Response> {
     }
     let state = supervisor.state(&name).await;
     Ok(Response::Status { name, state })
+}
+
+async fn stats(name: String, since_secs: u64, metrics: Arc<Metrics>) -> Result<Response> {
+    // Require registration so an unknown name is an error, consistent with `status`. An app with
+    // no traffic yet returns a valid empty snapshot rather than an error.
+    let reg = Registry::load()?;
+    if reg.get(&name).is_none() {
+        return Err(anyhow!("no app named `{}`", name));
+    }
+    let stats = metrics.snapshot(&name, since_secs);
+    Ok(Response::Stats { stats })
 }
 
 async fn log_path(name: String) -> Result<Response> {
