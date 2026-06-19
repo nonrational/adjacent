@@ -1,5 +1,5 @@
 //! Process-group resource sampling behind a platform-agnostic trait. The Linux impl reads
-//! `/proc`; the macOS impl (added in a later task) uses `libproc`. The sampler returns
+//! `/proc`; the macOS impl uses `libproc`. The sampler returns
 //! *cumulative* CPU time so the caller can derive a percentage from the delta between ticks.
 
 /// A computed, ready-to-report process sample (CPU already converted to a percentage).

@@ -1,6 +1,6 @@
 pub mod hist;
 pub mod route;
-pub mod sampler; // full impl in a later task; declared now so the module tree is stable
+pub mod sampler;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -228,7 +228,7 @@ impl Metrics {
         self.snapshot_at(app, since_secs, unix_now())
     }
 
-    /// Store the latest process sample for `app`. Wired into the sampler task in a later task.
+    /// Store the latest process sample for `app`. Called by the sampler task in `daemon.rs`.
     pub fn record_sample_at(&self, app: &str, sample: ProcSample, now_unix: u64) {
         let mut apps = self.apps.lock().unwrap();
         let am = apps.entry(app.to_string()).or_default();
