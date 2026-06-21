@@ -1,4 +1,3 @@
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use adj_protocol::AppState;
@@ -7,7 +6,6 @@ use http_body_util::{BodyExt, Empty};
 use hyper::client::conn::http1 as client_http1;
 use hyper::Request;
 use hyper_util::rt::TokioIo;
-use tokio::net::TcpStream;
 
 use crate::proxy::READY_POLL_INTERVAL;
 use crate::registry::AppConfig;
@@ -74,8 +72,7 @@ async fn probe_once(port: u16, health_check_url: Option<&str>) -> bool {
 }
 
 async fn tcp_ready_once(port: u16) -> bool {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    TcpStream::connect(addr).await.is_ok()
+    crate::proxy::connect_upstream(port).await.is_ok()
 }
 
 /// Issue a single HTTP GET to `127.0.0.1:<port><path>` and return true on a 2xx response.
@@ -94,8 +91,7 @@ async fn http_ready(port: u16, path: &str) -> bool {
     // probe, regardless of hyper internals.
     let mut conn_task: Option<tokio::task::JoinHandle<()>> = None;
     let attempt = async {
-        let addr = SocketAddr::from(([127, 0, 0, 1], port));
-        let stream = TcpStream::connect(addr).await.ok()?;
+        let stream = crate::proxy::connect_upstream(port).await.ok()?;
         let io = TokioIo::new(stream);
         let (mut sender, conn) = client_http1::handshake::<_, Empty<Bytes>>(io).await.ok()?;
         conn_task = Some(tokio::spawn(async move {
@@ -132,6 +128,38 @@ async fn http_ready(port: u16, path: &str) -> bool {
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
+
+    /// A dev server that binds only the IPv6 loopback must still probe ready. Node ≥17 resolves
+    /// "localhost" to `::1` first on macOS, so an otherwise-healthy app listens on `[::1]:port`
+    /// only. We previously connected to 127.0.0.1 exclusively, so the probe never saw the port
+    /// open and the app 504'd at the boot deadline (the long hang the user reported).
+    #[tokio::test]
+    async fn tcp_probe_reaches_ipv6_only_listener() {
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while listener.accept().await.is_ok() {}
+        });
+        assert!(
+            tcp_ready_once(port).await,
+            "v6-only listener should probe ready"
+        );
+    }
+
+    /// The common case — an app on the IPv4 loopback — must keep probing ready after the
+    /// dual-family fallback went in.
+    #[tokio::test]
+    async fn tcp_probe_reaches_ipv4_only_listener() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while listener.accept().await.is_ok() {}
+        });
+        assert!(
+            tcp_ready_once(port).await,
+            "v4-only listener should probe ready"
+        );
+    }
 
     /// After N timed-out probes against a hung-but-listening server (accepts, holds the socket,
     /// never responds), the runtime must carry no leftover connection tasks — only the server
