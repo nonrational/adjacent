@@ -7,6 +7,9 @@ help:
 build:
   cargo build
 
+install:
+  cargo install --path crates/adj
+
 test:
   cargo test
 
