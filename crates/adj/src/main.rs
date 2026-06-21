@@ -13,7 +13,6 @@ mod portforward;
 mod proxy;
 mod readiness;
 mod registry;
-#[allow(dead_code)] // wired into client::add in the next task
 mod scaffold;
 mod status;
 mod supervisor;

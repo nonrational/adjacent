@@ -8,6 +8,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use crate::paths;
+use crate::scaffold;
 use crate::worktree;
 
 async fn connect() -> Result<UnixStream> {
@@ -51,6 +52,46 @@ pub async fn add(path: String, label: Option<String>) -> Result<()> {
     // Canonicalize on the client side: relative paths must resolve against the user's CWD,
     // not the daemon's. The daemon may have been launched from anywhere (or by launchd).
     let canon = std::fs::canonicalize(&path).with_context(|| format!("resolving path {}", path))?;
+
+    // Scaffold a default manifest when the directory has none. The write happens client-side
+    // for the same reason as canonicalization: the file belongs in the user's working tree,
+    // and we never want the daemon (possibly rooted at `/` under launchd) writing into it.
+    // An existing manifest is left untouched.
+    let manifest = canon.join("adjacent.toml");
+    if !manifest.exists() {
+        let scaffold = scaffold::build(&canon);
+        std::fs::write(&manifest, &scaffold.toml)
+            .with_context(|| format!("writing {}", manifest.display()))?;
+        match (&scaffold.name, &scaffold.detected_cmd) {
+            (Some(_), Some(cmd)) => {
+                println!("generated adjacent.toml (cmd = \"{cmd}\")");
+                // fall through to registration
+            }
+            // No dev command: registering an app that can't boot is its own annoyance, so we
+            // write the starter file but stop. Non-zero exit (an Err) makes the "do something"
+            // explicit for scripts and agents chaining `adj add . && adj up`.
+            (_, None) => {
+                return Err(anyhow!(
+                    "couldn't detect a dev command — wrote a starter adjacent.toml at {}.\n  \
+                     set `cmd` (e.g. \"npm run dev\"), then run `adj add .` again.\n  \
+                     know the command for this stack? add a detector:\n  \
+                     https://github.com/nonrational/adjacent (see CONTRIBUTING)",
+                    manifest.display()
+                ));
+            }
+            // Rare: a basename that doesn't reduce to a DNS label. cmd is known but we won't
+            // guess a name.
+            (None, Some(_)) => {
+                return Err(anyhow!(
+                    "wrote a starter adjacent.toml at {}, but couldn't derive a name from the \
+                     directory.\n  set `name` (lowercase letters, digits, `-`), then run \
+                     `adj add .` again.",
+                    manifest.display()
+                ));
+            }
+        }
+    }
+
     // `--label` wins; otherwise a linked git worktree names its instance after the branch.
     let label = match label {
         Some(l) => Some(l),
