@@ -10,6 +10,12 @@ build:
 install:
   cargo install --path crates/adj
 
+format:
+  cargo fmt
+
+lint:
+  cargo fmt --all -- --check
+
 test:
   cargo test
 
