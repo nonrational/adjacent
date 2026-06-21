@@ -145,6 +145,35 @@ ThreadingHTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
     format!("exec /usr/bin/python3 {}", script.display())
 }
 
+/// Like `write_echo_server` but binds the IPv6 loopback (`::1`) only — what Node ≥17 does for
+/// "localhost" on macOS. Exercises the proxy's dual-family upstream connect: a v6-only app must
+/// still be reached by both the readiness probe and the forward path.
+async fn write_echo_server_v6(dir: &Path, marker: &str) -> String {
+    let py = format!(
+        r#"import os
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b"{marker}"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a, **kw):
+        pass
+class S(ThreadingHTTPServer):
+    address_family = __import__("socket").AF_INET6
+S(("::1", int(os.environ["PORT"])), H).serve_forever()
+"#
+    );
+    let script = dir.join("server.py");
+    tokio::fs::write(&script, py)
+        .await
+        .expect("write server.py");
+    format!("exec /usr/bin/python3 {}", script.display())
+}
+
 /// Write a server that echoes back the X-Forwarded-* request headers it received, one
 /// `name=value` per line. Lets the test assert what actually crossed the proxy boundary.
 async fn write_header_echo_server(dir: &Path) -> String {
@@ -315,6 +344,44 @@ async fn proxy_lazy_boots_app_and_forwards_response() {
     );
 
     let _ = sandbox.cmd().arg("down").arg("echo").output().await;
+    sandbox.stop_daemon().await;
+}
+
+/// An app that binds the IPv6 loopback only (Node ≥17's default for "localhost" on macOS) must
+/// proxy end-to-end. Regression for the v4-only upstream connect that left healthy v6 apps
+/// hanging until the boot deadline, then 504'ing.
+#[tokio::test]
+async fn proxy_reaches_ipv6_only_upstream() {
+    let mut sandbox = Sandbox::new().await;
+    sandbox.start_daemon().await;
+
+    let app_dir = TempDir::new().expect("app dir");
+    let cmd = write_echo_server_v6(app_dir.path(), "hello-from-v6").await;
+    write_app(app_dir.path(), "v6app", &cmd).await;
+
+    let add = sandbox
+        .cmd()
+        .arg("add")
+        .arg(app_dir.path())
+        .output()
+        .await
+        .expect("add");
+    assert!(add.status.success(), "add: {:?}", add);
+
+    let proxy_port = sandbox.proxy_port;
+    let (status_line, body) =
+        tokio::task::spawn_blocking(move || http_get(proxy_port, "v6app.adj.ac", "/"))
+            .await
+            .expect("join")
+            .expect("http_get");
+
+    assert!(
+        status_line.contains(" 200 "),
+        "expected 200 OK from v6-only upstream, got: {status_line}"
+    );
+    assert!(body.contains("hello-from-v6"), "body: {body}");
+
+    let _ = sandbox.cmd().arg("down").arg("v6app").output().await;
     sandbox.stop_daemon().await;
 }
 

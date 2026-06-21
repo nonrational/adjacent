@@ -369,6 +369,26 @@ pub fn boot_timeout_for(cfg: &AppConfig) -> Duration {
     Duration::from_secs(cfg.boot_timeout.unwrap_or(DEFAULT_BOOT_TIMEOUT_SECS))
 }
 
+/// Connect to a locally-bound upstream, trying both loopback families.
+///
+/// Dev servers disagree about what "localhost" means: Node ≥17 binds the IPv6 loopback (`::1`)
+/// first on macOS, while Vite/others bind IPv4 (`127.0.0.1`) or the IPv4 wildcard (`0.0.0.0`).
+/// We hardcoded `127.0.0.1` and so silently failed to reach v6-only servers — the readiness
+/// probe never saw the port open, the app timed out at the boot deadline, and every request
+/// 504'd after a long hang. Try v4 first (the common case, and what an `0.0.0.0` bind answers),
+/// then v6. A refused loopback connect returns immediately (kernel RST, no SYN backoff), so the
+/// fallback costs nothing measurable on the request path.
+pub(crate) async fn connect_upstream(port: u16) -> std::io::Result<TcpStream> {
+    let v4 = SocketAddr::from(([127, 0, 0, 1], port));
+    match TcpStream::connect(v4).await {
+        Ok(stream) => Ok(stream),
+        Err(_) => {
+            let v6 = SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port));
+            TcpStream::connect(v6).await
+        }
+    }
+}
+
 async fn forward(
     mut req: Request<Incoming>,
     upstream_port: u16,
@@ -390,10 +410,9 @@ async fn forward(
         .contains_key(hyper::header::UPGRADE)
         .then(|| hyper::upgrade::on(&mut req));
 
-    let upstream_addr = SocketAddr::from(([127, 0, 0, 1], upstream_port));
-    let stream = TcpStream::connect(upstream_addr)
+    let stream = connect_upstream(upstream_port)
         .await
-        .map_err(|e| anyhow!("connecting to upstream {upstream_addr}: {e}"))?;
+        .map_err(|e| anyhow!("connecting to upstream loopback:{upstream_port}: {e}"))?;
     let io = TokioIo::new(stream);
     let (mut sender, conn) = client_http1::handshake(io)
         .await
