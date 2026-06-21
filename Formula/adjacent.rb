@@ -1,4 +1,4 @@
-class Adj < Formula
+class Adjacent < Formula
   desc "Local dev-server harness so a human and an agent share one supervised server"
   homepage "https://adj.ac/ent"
   version "0.1.0-alpha.1"
@@ -29,7 +29,7 @@ class Adj < Formula
         adj install-port-forward  # route :80/:443 to the daemon
         adj install-ca            # opt-in local HTTPS CA; run it from this binary
 
-      HTTPS note: each 'brew upgrade adj' replaces the binary and invalidates the CA
+      HTTPS note: each 'brew upgrade adjacent' replaces the binary and invalidates the CA
       keychain ACL. Repair it with: adj install-ca --reset && adj install-ca
     EOS
   end
