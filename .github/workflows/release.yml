@@ -77,10 +77,15 @@ jobs:
       contents: read
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
+      # Exercise the install under Homebrew's upcoming tap-trust default (5.2/6.0) so the
+      # smoke test fails loudly here if our trust step ever drifts, rather than silently
+      # breaking real users once Homebrew flips the default on.
+      HOMEBREW_REQUIRE_TAP_TRUST: "1"
     steps:
-      - name: Tap and install from the published formula
+      - name: Tap, trust, and install from the published formula
         run: |
           brew tap nonrational/adjacent https://github.com/nonrational/adjacent
+          brew trust --formula nonrational/adjacent/adjacent
           brew install adjacent
 
       - name: Verify adj --version matches the release
