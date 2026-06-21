@@ -70,9 +70,15 @@
 
     .cmds { max-width: 820px; counter-reset: step; }
     .cmd { display: block; background: var(--panel); border: 1px solid var(--rule); border-left: 2px solid var(--accent-dim); padding: 0.85rem 1.25rem; margin-bottom: 0.75rem; color: var(--paper); font-size: 14px; counter-increment: step; position: relative; overflow-wrap: anywhere; }
-    .cmd::after { content: '0' counter(step); position: absolute; top: 0.85rem; right: 1.25rem; font-size: 11px; color: var(--dim); letter-spacing: 0.15em; }
+    .cmd::after { content: '0' counter(step); position: absolute; top: 0.85rem; right: 1.25rem; font-size: 11px; color: var(--dim); letter-spacing: 0.15em; transition: opacity 0.15s; pointer-events: none; }
+    .cmd:hover::after { opacity: 0; }
     .cmd .prompt { color: var(--accent); user-select: none; margin-right: 0.6rem; }
     .cmd .note { display: block; color: var(--soft); font-size: 12px; margin-top: 0.2rem; }
+    .cmd .copy { position: absolute; top: 0.62rem; right: 1.05rem; font: inherit; font-size: 11px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--dim); background: var(--ink); border: 1px solid var(--rule); padding: 0.15rem 0.55rem; cursor: pointer; opacity: 0; pointer-events: none; transition: opacity 0.15s, color 0.15s, border-color 0.15s; }
+    .cmd:hover .copy, .cmd .copy:focus-visible { opacity: 1; pointer-events: auto; }
+    .cmd .copy:hover { color: var(--accent); border-color: var(--accent-dim); }
+    .cmd .copy.copied { color: var(--accent); border-color: var(--accent-dim); }
+    @media (hover: none) { .cmd::after { display: none; } .cmd .copy { opacity: 1; pointer-events: auto; } }
 
     .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2.5rem 4rem; }
     .grid > div { border-top: 1px solid var(--rule); padding-top: 1.25rem; }
@@ -129,10 +135,10 @@
     <section>
       <div class="label">in practice</div>
       <div class="cmds">
-        <code class="cmd"><span class="prompt">$</span>adj add .<span class="note"># register the app's adjacent.toml</span></code>
-        <code class="cmd"><span class="prompt">$</span>open https://site.adj.ac<span class="note"># first request boots the server</span></code>
-        <code class="cmd"><span class="prompt">$</span>adj logs site --tail<span class="note"># one log, both of you read it</span></code>
-        <code class="cmd"><span class="prompt">$</span>adj agent-instructions &gt;&gt; CLAUDE.md<span class="note"># teach your agent to share</span></code>
+        <code class="cmd"><span class="prompt">$</span><span class="copytext">adj add .</span><span class="note"># register the app's adjacent.toml</span></code>
+        <code class="cmd"><span class="prompt">$</span><span class="copytext">open https://site.adj.ac</span><span class="note"># first request boots the server</span></code>
+        <code class="cmd"><span class="prompt">$</span><span class="copytext">adj logs site --tail</span><span class="note"># one log, both of you read it</span></code>
+        <code class="cmd"><span class="prompt">$</span><span class="copytext">adj agent-instructions &gt;&gt; CLAUDE.md</span><span class="note"># teach your agent to share</span></code>
       </div>
     </section>
 
@@ -169,8 +175,9 @@
     <section>
       <div class="label">install &middot; alpha</div>
       <div class="cmds">
-        <code class="cmd"><span class="prompt">$</span>brew tap nonrational/adjacent https://github.com/nonrational/adjacent<span class="note"># straight from the repo &mdash; no separate tap</span></code>
-        <code class="cmd"><span class="prompt">$</span>brew install adjacent<span class="note"># Apple Silicon, unsigned alpha build</span></code>
+        <code class="cmd"><span class="prompt">$</span><span class="copytext">brew tap nonrational/adjacent https://github.com/nonrational/adjacent</span><span class="note"># straight from the repo &mdash; no separate tap</span></code>
+        <code class="cmd"><span class="prompt">$</span><span class="copytext">brew trust nonrational/adjacent</span><span class="note"># third-party tap, so opt in once</span></code>
+        <code class="cmd"><span class="prompt">$</span><span class="copytext">brew install adjacent</span><span class="note"># Apple Silicon, unsigned alpha build</span></code>
       </div>
     </section>
 
@@ -186,5 +193,42 @@
       <a href="https://github.com/nonrational/adjacent">source on github</a>
     </footer>
   </div>
+  <script>
+    // Build copy buttons in JS so they only appear when scripting is on —
+    // without it the commands stay plain, readable and selectable.
+    document.querySelectorAll('.cmd').forEach((cmd) => {
+      const target = cmd.querySelector('.copytext');
+      if (!target) return;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'copy';
+      btn.textContent = 'copy';
+      btn.setAttribute('aria-label', 'Copy command to clipboard');
+      let reset;
+      btn.addEventListener('click', async () => {
+        const text = target.textContent.trim();
+        try {
+          await navigator.clipboard.writeText(text);
+        } catch {
+          // No clipboard API (older or non-HTTPS context) — fall back to a selection copy.
+          const range = document.createRange();
+          range.selectNodeContents(target);
+          const sel = getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+          document.execCommand('copy');
+          sel.removeAllRanges();
+        }
+        btn.textContent = 'copied';
+        btn.classList.add('copied');
+        clearTimeout(reset);
+        reset = setTimeout(() => {
+          btn.textContent = 'copy';
+          btn.classList.remove('copied');
+        }, 1400);
+      });
+      cmd.appendChild(btn);
+    });
+  </script>
 </body>
 </html>
