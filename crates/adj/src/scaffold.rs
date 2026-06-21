@@ -206,7 +206,11 @@ mod tests {
     #[test]
     fn script_priority_is_dev_then_start_then_serve() {
         let d = TempDir::new().unwrap();
-        write(d.path(), "package.json", r#"{"scripts":{"serve":"x","start":"y"}}"#);
+        write(
+            d.path(),
+            "package.json",
+            r#"{"scripts":{"serve":"x","start":"y"}}"#,
+        );
         assert_eq!(detect_cmd(d.path()).as_deref(), Some("npm run start"));
     }
 
@@ -222,7 +226,11 @@ mod tests {
     #[test]
     fn detects_deno_tasks() {
         let d = TempDir::new().unwrap();
-        write(d.path(), "deno.json", r#"{"tasks":{"dev":"deno run -A main.ts"}}"#);
+        write(
+            d.path(),
+            "deno.json",
+            r#"{"tasks":{"dev":"deno run -A main.ts"}}"#,
+        );
         assert_eq!(detect_cmd(d.path()).as_deref(), Some("deno task dev"));
     }
 
@@ -238,7 +246,10 @@ mod tests {
     fn detects_django_rails_rack() {
         let d = TempDir::new().unwrap();
         write(d.path(), "manage.py", "");
-        assert_eq!(detect_cmd(d.path()).as_deref(), Some("python manage.py runserver"));
+        assert_eq!(
+            detect_cmd(d.path()).as_deref(),
+            Some("python manage.py runserver")
+        );
 
         let d = TempDir::new().unwrap();
         std::fs::create_dir(d.path().join("bin")).unwrap();
@@ -265,7 +276,10 @@ mod tests {
         assert!(toml.contains("cmd = \"npm run dev\""), "{toml}");
         assert!(toml.contains("# port_env = \"PORT\""), "{toml}");
         // The generated manifest must parse back through the real config reader.
-        assert!(toml::from_str::<toml::Value>(&toml).is_ok(), "invalid toml: {toml}");
+        assert!(
+            toml::from_str::<toml::Value>(&toml).is_ok(),
+            "invalid toml: {toml}"
+        );
     }
 
     #[test]
@@ -273,7 +287,10 @@ mod tests {
         let toml = render(None, None);
         assert!(toml.contains("cmd = \"\""), "{toml}");
         assert!(toml.contains("TODO"), "{toml}");
-        assert!(toml::from_str::<toml::Value>(&toml).is_ok(), "invalid toml: {toml}");
+        assert!(
+            toml::from_str::<toml::Value>(&toml).is_ok(),
+            "invalid toml: {toml}"
+        );
     }
 
     #[test]

@@ -114,14 +114,26 @@ async fn add_scaffolds_but_does_not_register_when_cmd_undetected() {
     std::fs::create_dir(&app).unwrap();
 
     let add = sandbox.cmd().arg("add").arg(&app).output().await.unwrap();
-    assert!(!add.status.success(), "expected non-zero exit when cmd undetected");
+    assert!(
+        !add.status.success(),
+        "expected non-zero exit when cmd undetected"
+    );
     let stderr = String::from_utf8_lossy(&add.stderr);
-    assert!(stderr.contains("couldn't detect a dev command"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("couldn't detect a dev command"),
+        "stderr: {stderr}"
+    );
     assert!(stderr.contains("CONTRIBUTING"), "stderr: {stderr}");
 
     // The file is written despite the non-zero exit.
-    assert!(app.join("adjacent.toml").exists(), "manifest should be written");
-    assert!(!sandbox.registry_has("myapp"), "myapp must not be registered");
+    assert!(
+        app.join("adjacent.toml").exists(),
+        "manifest should be written"
+    );
+    assert!(
+        !sandbox.registry_has("myapp"),
+        "myapp must not be registered"
+    );
 }
 
 #[tokio::test]
