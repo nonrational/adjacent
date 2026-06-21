@@ -137,9 +137,7 @@ mod tests {
     async fn tcp_probe_reaches_ipv6_only_listener() {
         let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move {
-            while listener.accept().await.is_ok() {}
-        });
+        tokio::spawn(async move { while listener.accept().await.is_ok() {} });
         assert!(
             tcp_ready_once(port).await,
             "v6-only listener should probe ready"
@@ -152,9 +150,7 @@ mod tests {
     async fn tcp_probe_reaches_ipv4_only_listener() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move {
-            while listener.accept().await.is_ok() {}
-        });
+        tokio::spawn(async move { while listener.accept().await.is_ok() {} });
         assert!(
             tcp_ready_once(port).await,
             "v4-only listener should probe ready"
