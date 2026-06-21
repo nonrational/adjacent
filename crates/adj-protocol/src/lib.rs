@@ -40,6 +40,12 @@ pub enum Request {
     },
     /// Delete every registry entry whose registered path no longer exists on disk.
     Prune,
+    /// Snapshot the in-memory metrics window for `name`. `since_secs == 0` means the full window.
+    Stats {
+        name: String,
+        #[serde(default)]
+        since_secs: u64,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -53,6 +59,7 @@ pub enum Response {
     Error { message: String },
     Removed { name: String },
     Pruned { removed: Vec<String> },
+    Stats { stats: StatsDto },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,4 +190,118 @@ pub struct LogRecord {
 pub enum LogStream {
     Stdout,
     Stderr,
+}
+
+/// Stable JSON shape for `adj stats <name> --json`. Produced by the daemon's in-memory metrics
+/// collector over the rolling window. See `crates/adj/JSON.md`. Unlike `StatusDto`/`ListEntryDto`
+/// (borrowed views), this is owned: it carries a computed snapshot, not a borrow of daemon state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StatsDto {
+    pub name: String,
+    /// Seconds of history this snapshot covers (the rolling window, or `since` when narrower).
+    pub window_secs: u64,
+    /// Total requests recorded in the covered window, across all routes.
+    pub total_requests: u64,
+    pub routes: Vec<RouteStatDto>,
+    /// Slowest individual raw paths in the window, for drill-down behind the templated routes.
+    pub slowest_raw: Vec<RawSampleDto>,
+    /// Process resource summary. Absent when the app isn't running, has no fresh sample, or the
+    /// platform has no `ProcSampler`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<ProcStatDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RouteStatDto {
+    /// Templated route, e.g. `GET /users/:id`.
+    pub route: String,
+    pub count: u64,
+    pub latency_ms: LatencyDto,
+    pub status_2xx: u64,
+    pub status_3xx: u64,
+    pub status_4xx: u64,
+    pub status_5xx: u64,
+}
+
+/// Latency percentiles in milliseconds. Values are histogram bucket upper bounds, so they are
+/// honest over-estimates of the true percentile — never under-reported.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LatencyDto {
+    pub p50: u64,
+    pub p95: u64,
+    pub p99: u64,
+    pub max: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawSampleDto {
+    pub method: String,
+    pub path: String,
+    pub status: u16,
+    pub latency_ms: u64,
+}
+
+/// Whole-process-group resource summary from the most recent sample. CPU is group-wide and
+/// cannot be attributed to a route — the snapshot pairs it with request metrics on a shared
+/// window, not as causation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProcStatDto {
+    pub cpu_pct: f64,
+    pub rss_bytes: u64,
+    pub threads: u64,
+    pub fds: u64,
+    /// RFC3339 UTC timestamp of the most recent sample.
+    pub sampled_at: String,
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::*;
+
+    #[test]
+    fn stats_dto_round_trips_and_omits_absent_process() {
+        let dto = StatsDto {
+            name: "site".into(),
+            window_secs: 1800,
+            total_requests: 3,
+            routes: vec![RouteStatDto {
+                route: "GET /users/:id".into(),
+                count: 3,
+                latency_ms: LatencyDto {
+                    p50: 8,
+                    p95: 128,
+                    p99: 256,
+                    max: 412,
+                },
+                status_2xx: 2,
+                status_3xx: 0,
+                status_4xx: 1,
+                status_5xx: 0,
+            }],
+            slowest_raw: vec![RawSampleDto {
+                method: "GET".into(),
+                path: "/users/42".into(),
+                status: 200,
+                latency_ms: 412,
+            }],
+            process: None,
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(
+            !json.contains("process"),
+            "absent process must be omitted: {json}"
+        );
+        let back: StatsDto = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, dto);
+    }
+
+    #[test]
+    fn stats_request_tags_kind() {
+        let req = Request::Stats {
+            name: "site".into(),
+            since_secs: 0,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"kind\":\"stats\""), "got: {json}");
+    }
 }

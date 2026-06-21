@@ -17,6 +17,7 @@ use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
+use crate::metrics::{Metrics, RequestRecord};
 use crate::readiness::wait_ready;
 use crate::registry::{self, AppConfig, Registry};
 use crate::status;
@@ -96,7 +97,7 @@ fn report_bound_port(path: Result<std::path::PathBuf>, port: u16) {
     }
 }
 
-pub async fn run(supervisor: Arc<Supervisor>) -> Result<()> {
+pub async fn run(supervisor: Arc<Supervisor>, metrics: Arc<Metrics>) -> Result<()> {
     let port = proxy_port();
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
     let listener = TcpListener::bind(addr)
@@ -121,8 +122,9 @@ pub async fn run(supervisor: Arc<Supervisor>) -> Result<()> {
         };
         let sup = supervisor.clone();
         let gate = gate.clone();
+        let metrics = metrics.clone();
         tokio::spawn(async move {
-            serve_plain(stream, sup, gate, peer.ip(), "http").await;
+            serve_plain(stream, sup, gate, metrics, peer.ip(), "http").await;
         });
     }
 }
@@ -132,6 +134,7 @@ pub async fn run(supervisor: Arc<Supervisor>) -> Result<()> {
 /// hasn't been generated yet the daemon logs and keeps serving HTTP only (AC #5 in issue #6).
 pub async fn run_https(
     supervisor: Arc<Supervisor>,
+    metrics: Arc<Metrics>,
     resolver: Arc<tls::LeafResolver>,
 ) -> Result<()> {
     let server_config =
@@ -162,6 +165,7 @@ pub async fn run_https(
         };
         let sup = supervisor.clone();
         let gate = gate.clone();
+        let metrics = metrics.clone();
         let acceptor = acceptor.clone();
         tokio::spawn(async move {
             // TLS handshake is per-connection. Failures here are noisy under normal browser
@@ -173,7 +177,7 @@ pub async fn run_https(
                     return;
                 }
             };
-            serve_plain(tls_stream, sup, gate, peer.ip(), "https").await;
+            serve_plain(tls_stream, sup, gate, metrics, peer.ip(), "https").await;
         });
     }
 }
@@ -185,6 +189,7 @@ async fn serve_plain<S>(
     stream: S,
     sup: Arc<Supervisor>,
     gate: Arc<BootGate>,
+    metrics: Arc<Metrics>,
     client_ip: IpAddr,
     proto: &'static str,
 ) where
@@ -194,7 +199,8 @@ async fn serve_plain<S>(
     let service = service_fn(move |req: Request<Incoming>| {
         let sup = sup.clone();
         let gate = gate.clone();
-        async move { Ok::<_, Infallible>(handle(req, sup, gate, client_ip, proto).await) }
+        let metrics = metrics.clone();
+        async move { Ok::<_, Infallible>(handle(req, sup, gate, metrics, client_ip, proto).await) }
     });
     if let Err(err) = server_http1::Builder::new()
         .serve_connection(io, service)
@@ -209,6 +215,7 @@ async fn handle(
     req: Request<Incoming>,
     supervisor: Arc<Supervisor>,
     gate: Arc<BootGate>,
+    metrics: Arc<Metrics>,
     client_ip: IpAddr,
     proto: &'static str,
 ) -> Response<BoxBody<Bytes, hyper::Error>> {
@@ -277,10 +284,39 @@ async fn handle(
     // for the duration of `idle_timeout` doesn't get spuriously stopped mid-stream.
     supervisor.touch_idle(&name).await;
 
-    match forward(req, upstream_port, &raw_host, client_ip, proto).await {
-        Ok(resp) => resp,
+    // Capture method + path before `forward` consumes the request, and time to the response
+    // head (TTFB) — not body completion, so long-lived streams don't skew latency. Status and
+    // a templated route are recorded for the rolling metrics window.
+    let method = req.method().as_str().to_string();
+    let raw_path = req.uri().path().to_string();
+    let started = std::time::Instant::now();
+
+    let result = forward(req, upstream_port, &raw_host, client_ip, proto).await;
+    let latency_ms = started.elapsed().as_millis() as u64;
+    match result {
+        Ok(resp) => {
+            metrics.record_request(
+                &name,
+                RequestRecord {
+                    method,
+                    raw_path,
+                    status: resp.status().as_u16(),
+                    latency_ms,
+                },
+            );
+            resp
+        }
         Err(err) => {
             tracing::warn!("proxy forward to `{name}:{upstream_port}` failed: {err}");
+            metrics.record_request(
+                &name,
+                RequestRecord {
+                    method,
+                    raw_path,
+                    status: 502,
+                    latency_ms,
+                },
+            );
             error_response(
                 StatusCode::BAD_GATEWAY,
                 &format!("upstream `{name}` error: {err}"),

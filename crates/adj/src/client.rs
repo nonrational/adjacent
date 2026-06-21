@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use adj_protocol::{ListEntryDto, LogRecord, Request, Response, StatusDto};
+use adj_protocol::{ListEntryDto, LogRecord, Request, Response, StatsDto, StatusDto};
 use anyhow::{anyhow, Context, Result};
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -172,6 +172,111 @@ pub async fn status(name: String, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Parse a `--since` value into seconds. Accepts bare seconds (`90`) or a single unit suffix:
+/// `s`, `m`, `h`. `0` means "the full window".
+pub fn parse_since(s: &str) -> Result<u64> {
+    let s = s.trim();
+    if let Ok(n) = s.parse::<u64>() {
+        return Ok(n);
+    }
+    let (num, mult) = match s.chars().last() {
+        Some('s') => (&s[..s.len() - 1], 1),
+        Some('m') => (&s[..s.len() - 1], 60),
+        Some('h') => (&s[..s.len() - 1], 3600),
+        _ => return Err(anyhow!("invalid --since `{s}` (use e.g. 30s, 5m, 1h)")),
+    };
+    let n: u64 = num
+        .parse()
+        .map_err(|_| anyhow!("invalid --since `{s}` (use e.g. 30s, 5m, 1h)"))?;
+    Ok(n * mult)
+}
+
+pub async fn stats(name: String, json: bool, since: String) -> Result<()> {
+    let since_secs = parse_since(&since)?;
+    let resp = into_error(
+        request(Request::Stats {
+            name: name.clone(),
+            since_secs,
+        })
+        .await?,
+    )?;
+    let Response::Stats { stats } = resp else {
+        return Err(anyhow!("unexpected response from daemon"));
+    };
+    if json {
+        println!("{}", serde_json::to_string(&stats)?);
+        return Ok(());
+    }
+    render_stats_table(&stats);
+    Ok(())
+}
+
+fn render_stats_table(s: &StatsDto) {
+    let mins = s.window_secs / 60;
+    println!("{} — last {mins}m, {} requests", s.name, s.total_requests);
+    if let Some(p) = &s.process {
+        println!(
+            "  process: cpu {:.0}%  rss {}  threads {}  fds {}",
+            p.cpu_pct,
+            human_bytes(p.rss_bytes),
+            p.threads,
+            p.fds
+        );
+    }
+    if s.routes.is_empty() {
+        println!("  (no requests in window)");
+        return;
+    }
+    println!(
+        "  {:<34} {:>6} {:>7} {:>7} {:>6}",
+        "route", "count", "p50", "p95", "err%"
+    );
+    for r in &s.routes {
+        let errs = r.status_4xx + r.status_5xx;
+        let err_pct = if r.count > 0 {
+            errs as f64 * 100.0 / r.count as f64
+        } else {
+            0.0
+        };
+        println!(
+            "  {:<34} {:>6} {:>5}ms {:>5}ms {:>5.0}%",
+            truncate(&r.route, 34),
+            r.count,
+            r.latency_ms.p50,
+            r.latency_ms.p95,
+            err_pct
+        );
+    }
+    if !s.slowest_raw.is_empty() {
+        println!("  slowest:");
+        for raw in &s.slowest_raw {
+            println!(
+                "    {:>5}ms  {} {} ({})",
+                raw.latency_ms, raw.method, raw.path, raw.status
+            );
+        }
+    }
+}
+
+fn human_bytes(n: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
+    let mut v = n as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    format!("{v:.0}{}", UNITS[u])
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max - 1])
+    }
+}
+
 pub async fn wait_ready(name: String, timeout_secs: u64) -> Result<()> {
     // The daemon blocks the response until ready or timeout — the client just waits on the
     // socket. Errors (timeout, crash, not registered) come back as `Response::Error`.
@@ -319,4 +424,20 @@ where
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_since_supports_units_and_bare_seconds() {
+        assert_eq!(parse_since("0").unwrap(), 0);
+        assert_eq!(parse_since("30s").unwrap(), 30);
+        assert_eq!(parse_since("5m").unwrap(), 300);
+        assert_eq!(parse_since("1h").unwrap(), 3600);
+        assert_eq!(parse_since("90").unwrap(), 90);
+        assert!(parse_since("nonsense").is_err());
+        assert!(parse_since("5d").is_err());
+    }
 }

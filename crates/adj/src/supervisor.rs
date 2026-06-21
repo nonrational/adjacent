@@ -389,6 +389,20 @@ impl Supervisor {
             })
             .collect()
     }
+
+    /// Snapshot every running app's `(name, pid)`. The pid is the process-group leader (apps are
+    /// spawned with `process_group(0)`, so pgid == pid). Used by the metrics sampler.
+    pub async fn running_pids(&self) -> Vec<(String, u32)> {
+        let inner = self.inner.lock().await;
+        inner
+            .apps
+            .iter()
+            .filter_map(|(name, rt)| match rt.state {
+                AppState::Running { pid, .. } => Some((name.clone(), pid)),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -441,6 +455,15 @@ mod tests {
         assert_eq!(sup.intentional_stop_flag("hot").await, Some(false));
         // And the state is still Running.
         assert!(matches!(sup.state("hot").await, AppState::Running { .. }));
+    }
+
+    #[tokio::test]
+    async fn running_pids_lists_only_running_apps() {
+        let sup = Supervisor::new();
+        sup.insert_fake_running("up", std::time::Instant::now())
+            .await;
+        let pids = sup.running_pids().await;
+        assert_eq!(pids, vec![("up".to_string(), 1u32)]);
     }
 
     #[tokio::test]

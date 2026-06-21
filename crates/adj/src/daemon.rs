@@ -8,6 +8,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
+use crate::metrics::sampler::{default_sampler, ProcSample};
+use crate::metrics::Metrics;
 use crate::paths;
 use crate::proxy;
 use crate::readiness::{wait_ready as readiness_wait, ReadinessError};
@@ -19,6 +21,10 @@ use crate::tls;
 /// stopped. The poll cost is tiny (one mutex lock per pass) so a short interval keeps the
 /// observable shutdown latency reasonable even for small `idle_timeout` values.
 const IDLE_SCAN_INTERVAL: Duration = Duration::from_millis(500);
+
+/// How often the metrics sampler reads each running app's process group. Matches the spec's 2s
+/// cadence; CPU% is derived from the delta between consecutive ticks.
+const METRICS_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
 
 pub async fn run() -> Result<()> {
     tracing_subscriber::fmt()
@@ -45,6 +51,7 @@ pub async fn run() -> Result<()> {
     tracing::info!("adj daemon listening at {}", socket.display());
 
     let supervisor = Arc::new(Supervisor::new());
+    let metrics = Arc::new(Metrics::new());
     let registry_lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
 
     // Best-effort cleanup of the socket on Ctrl-C so subsequent boots aren't blocked.
@@ -59,8 +66,9 @@ pub async fn run() -> Result<()> {
     // Reverse proxy runs in the same process as the control-plane listener; failures here are
     // logged but don't kill the daemon — the control plane is still useful without the proxy.
     let proxy_supervisor = supervisor.clone();
+    let proxy_metrics = metrics.clone();
     tokio::spawn(async move {
-        if let Err(err) = proxy::run(proxy_supervisor).await {
+        if let Err(err) = proxy::run(proxy_supervisor, proxy_metrics).await {
             tracing::error!("proxy listener exited: {err}");
         }
     });
@@ -82,11 +90,12 @@ pub async fn run() -> Result<()> {
     {
         let cell = resolver.clone();
         let https_supervisor = supervisor.clone();
+        let https_metrics = metrics.clone();
         tokio::spawn(async move {
             match tls::LeafResolver::new() {
                 Ok(r) => {
                     let _ = cell.set(r.clone());
-                    if let Err(err) = proxy::run_https(https_supervisor, r).await {
+                    if let Err(err) = proxy::run_https(https_supervisor, https_metrics, r).await {
                         tracing::error!("https listener exited: {err}");
                     }
                 }
@@ -103,6 +112,12 @@ pub async fn run() -> Result<()> {
         idle_scanner(idle_supervisor).await;
     });
 
+    let sampler_supervisor = supervisor.clone();
+    let sampler_metrics = metrics.clone();
+    tokio::spawn(async move {
+        metrics_sampler(sampler_supervisor, sampler_metrics).await;
+    });
+
     loop {
         let (stream, _addr) = match listener.accept().await {
             Ok(pair) => pair,
@@ -114,8 +129,9 @@ pub async fn run() -> Result<()> {
         let sup = supervisor.clone();
         let reg_lock = registry_lock.clone();
         let resolver = resolver.clone();
+        let metrics = metrics.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle_client(stream, sup, reg_lock, resolver).await {
+            if let Err(err) = handle_client(stream, sup, reg_lock, resolver, metrics).await {
                 tracing::warn!("client handler error: {err}");
             }
         });
@@ -145,6 +161,7 @@ async fn handle_client(
     supervisor: Arc<Supervisor>,
     registry_lock: Arc<Mutex<()>>,
     resolver: Arc<std::sync::OnceLock<Arc<tls::LeafResolver>>>,
+    metrics: Arc<Metrics>,
 ) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -164,7 +181,7 @@ async fn handle_client(
         }
     };
 
-    let response = match dispatch(req, supervisor, registry_lock, resolver).await {
+    let response = match dispatch(req, supervisor, registry_lock, resolver, metrics).await {
         Ok(r) => r,
         Err(err) => Response::Error {
             message: format!("{err}"),
@@ -190,6 +207,7 @@ async fn dispatch(
     supervisor: Arc<Supervisor>,
     registry_lock: Arc<Mutex<()>>,
     resolver: Arc<std::sync::OnceLock<Arc<tls::LeafResolver>>>,
+    metrics: Arc<Metrics>,
 ) -> Result<Response> {
     match req {
         Request::Ping => Ok(Response::Ok),
@@ -205,6 +223,7 @@ async fn dispatch(
         }
         Request::Remove { name } => remove(name, supervisor, registry_lock, resolver).await,
         Request::Prune => prune(supervisor, registry_lock, resolver).await,
+        Request::Stats { name, since_secs } => stats(name, since_secs, metrics).await,
     }
 }
 
@@ -485,6 +504,17 @@ async fn status(name: String, supervisor: Arc<Supervisor>) -> Result<Response> {
     Ok(Response::Status { name, state })
 }
 
+async fn stats(name: String, since_secs: u64, metrics: Arc<Metrics>) -> Result<Response> {
+    // Require registration so an unknown name is an error, consistent with `status`. An app with
+    // no traffic yet returns a valid empty snapshot rather than an error.
+    let reg = Registry::load()?;
+    if reg.get(&name).is_none() {
+        return Err(anyhow!("no app named `{}`", name));
+    }
+    let stats = metrics.snapshot(&name, since_secs);
+    Ok(Response::Stats { stats })
+}
+
 async fn log_path(name: String) -> Result<Response> {
     let reg = Registry::load()?;
     if reg.get(&name).is_none() {
@@ -587,4 +617,53 @@ async fn prune(
         }
     }
     Ok(Response::Pruned { removed: stale })
+}
+
+/// Periodic process sampler: every tick, read each running app's process-group resource usage
+/// and record it. CPU% is `(delta cpu_time) / (delta wall_time)`, so the loop keeps each app's
+/// previous cumulative CPU time and the tick timestamp. Apps that stop simply drop out of
+/// `running_pids`, and their stale sample ages out of the snapshot.
+async fn metrics_sampler(supervisor: Arc<Supervisor>, metrics: Arc<Metrics>) {
+    let Some(mut sampler) = default_sampler() else {
+        tracing::info!("process sampling unsupported on this platform; HTTP metrics only");
+        return;
+    };
+    // name -> (prev cumulative cpu_ms, prev wall_ms)
+    let mut prev: std::collections::HashMap<String, (u64, u128)> = std::collections::HashMap::new();
+    loop {
+        tokio::time::sleep(METRICS_SAMPLE_INTERVAL).await;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let running = supervisor.running_pids().await;
+        let live: std::collections::HashSet<String> =
+            running.iter().map(|(n, _)| n.clone()).collect();
+        for (name, pid) in running {
+            // pgid == pid because apps are spawned as their own process-group leader.
+            let Some(raw) = sampler.sample(pid as i32) else {
+                continue;
+            };
+            let cpu_pct = match prev.get(&name) {
+                Some((prev_cpu, prev_wall)) if now_ms > *prev_wall => {
+                    let d_cpu = raw.cpu_time_ms.saturating_sub(*prev_cpu) as f64;
+                    let d_wall = (now_ms - *prev_wall) as f64;
+                    (d_cpu / d_wall) * 100.0
+                }
+                _ => 0.0,
+            };
+            prev.insert(name.clone(), (raw.cpu_time_ms, now_ms));
+            metrics.record_sample(
+                &name,
+                ProcSample {
+                    cpu_pct,
+                    rss_bytes: raw.rss_bytes,
+                    threads: raw.threads,
+                    fds: raw.fds,
+                },
+            );
+        }
+        // Forget apps that are no longer running so their prev-CPU baseline doesn't leak.
+        prev.retain(|name, _| live.contains(name));
+    }
 }
