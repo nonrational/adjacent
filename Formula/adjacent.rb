@@ -1,13 +1,13 @@
 class Adjacent < Formula
   desc "Local dev-server harness so a human and an agent share one supervised server"
   homepage "https://adj.ac/ent"
-  version "0.1.0-alpha.1"
+  version "0.1.0-alpha.2"
   license "MIT OR Apache-2.0"
 
   on_macos do
     on_arm do
-      url "https://github.com/nonrational/adjacent/releases/download/v0.1.0-alpha.1/adj-0.1.0-alpha.1-aarch64-apple-darwin.tar.gz"
-      sha256 "867ad2afac3b6d988872b5620b521dc0f4d6f373db9bf3fa10415e248eaf15d6"
+      url "https://github.com/nonrational/adjacent/releases/download/v0.1.0-alpha.2/adj-0.1.0-alpha.2-aarch64-apple-darwin.tar.gz"
+      sha256 "996215b0775df3fb5b9ead78b5ab419d4c198a818d332f1d925df496f154b797"
     end
     on_intel do
       odie "adj alpha ships Apple Silicon (arm64) binaries only for now"
@@ -35,6 +35,6 @@ class Adjacent < Formula
   end
 
   test do
-    assert_match "0.1.0-alpha.1", shell_output("#{bin}/adj --version")
+    assert_match "0.1.0-alpha.2", shell_output("#{bin}/adj --version")
   end
 end
