@@ -78,6 +78,29 @@ fn read_port_file(path: Result<PathBuf>) -> Option<u16> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
+/// Build the daemon-owned `ADJ_*` boot variables for an app addressed at `name` (the routing
+/// key — carries the worktree label when present). `http`/`https` are the proxy's
+/// externally-reachable listener ports, already resolved. A `None` port drops the matching
+/// `_DIRECT` URL rather than pointing it at a dead port; the portless canonical URLs always
+/// appear. `http` is `None` only in pathological cases (the HTTP listener always binds), but
+/// it is guarded symmetrically.
+fn adj_env(name: &str, http: Option<u16>, https: Option<u16>) -> Vec<(String, String)> {
+    let host = format!("{name}{}", crate::proxy::HOST_SUFFIX);
+    let mut vars = vec![
+        ("ADJ_NAME".to_string(), name.to_string()),
+        ("ADJ_HOST".to_string(), host.clone()),
+        ("ADJ_URL".to_string(), format!("https://{host}")),
+        ("ADJ_URL_HTTP".to_string(), format!("http://{host}")),
+    ];
+    if let Some(p) = https {
+        vars.push(("ADJ_URL_DIRECT".to_string(), format!("https://{host}:{p}")));
+    }
+    if let Some(p) = http {
+        vars.push(("ADJ_URL_HTTP_DIRECT".to_string(), format!("http://{host}:{p}")));
+    }
+    vars
+}
+
 pub struct Supervisor {
     inner: Arc<Mutex<Inner>>,
     proxy_ports: ProxyPorts,
@@ -178,6 +201,15 @@ impl Supervisor {
             }
         }
         command.env(port_env, port.to_string());
+        // Daemon-owned ADJ_* namespace: the app's own external identity and URLs. Injected
+        // after env_file/[env] so these authoritative values win over anything a user set.
+        // `name` is the routing key, so the host and URLs address the exact vhost the proxy
+        // serves (worktree label included). Resolving the proxy ports here may read a port
+        // file, but only in the kernel-assigned (`0`) sandbox case; the default daemon uses
+        // the configured constants and touches no file.
+        for (k, v) in adj_env(&name, self.proxy_ports.http(), self.proxy_ports.https()) {
+            command.env(k, v);
+        }
         // Put the shell and everything it spawns in its own process group so we can signal
         // the whole tree on stop. Without this, SIGTERM/SIGKILL hit only `sh` and the real
         // long-running command (e.g. a dev server) is reparented to init and keeps the port.
@@ -522,6 +554,42 @@ mod tests {
         assert_eq!(sup.intentional_stop_flag("hot").await, Some(false));
         // And the state is still Running.
         assert!(matches!(sup.state("hot").await, AppState::Running { .. }));
+    }
+
+    #[test]
+    fn adj_env_builds_all_six_vars() {
+        let vars: std::collections::HashMap<String, String> =
+            adj_env("alannorton-com", Some(8080), Some(8443))
+                .into_iter()
+                .collect();
+        assert_eq!(vars["ADJ_NAME"], "alannorton-com");
+        assert_eq!(vars["ADJ_HOST"], "alannorton-com.adj.ac");
+        assert_eq!(vars["ADJ_URL"], "https://alannorton-com.adj.ac");
+        assert_eq!(vars["ADJ_URL_HTTP"], "http://alannorton-com.adj.ac");
+        assert_eq!(vars["ADJ_URL_DIRECT"], "https://alannorton-com.adj.ac:8443");
+        assert_eq!(vars["ADJ_URL_HTTP_DIRECT"], "http://alannorton-com.adj.ac:8080");
+    }
+
+    #[test]
+    fn adj_env_uses_routing_key_for_worktree_instances() {
+        // A worktree instance is keyed `<label>.<name>` and routes at `<label>.<name>.adj.ac`.
+        let vars: std::collections::HashMap<String, String> =
+            adj_env("feature-x.site", Some(8080), Some(8443))
+                .into_iter()
+                .collect();
+        assert_eq!(vars["ADJ_NAME"], "feature-x.site");
+        assert_eq!(vars["ADJ_HOST"], "feature-x.site.adj.ac");
+        assert_eq!(vars["ADJ_URL"], "https://feature-x.site.adj.ac");
+    }
+
+    #[test]
+    fn adj_env_omits_https_direct_when_port_unresolved() {
+        let vars: std::collections::HashMap<String, String> =
+            adj_env("site", Some(8080), None).into_iter().collect();
+        assert!(!vars.contains_key("ADJ_URL_DIRECT"));
+        // The portless canonical https URL and the http direct URL still appear.
+        assert_eq!(vars["ADJ_URL"], "https://site.adj.ac");
+        assert_eq!(vars["ADJ_URL_HTTP_DIRECT"], "http://site.adj.ac:8080");
     }
 
     #[tokio::test]
