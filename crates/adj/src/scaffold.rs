@@ -146,7 +146,13 @@ fn render(name: Option<&str>, cmd: Option<&str>) -> String {
          # port_env = \"PORT\"\n\
          # env_file = \".env.local\"\n\
          # idle_timeout = \"15m\"          # \"30s\" / \"1h\" / \"off\"\n\
-         # health_check_url = \"/healthz\"\n"
+         # health_check_url = \"/healthz\"\n\
+         \n\
+         # Adjacent injects these into `cmd` at boot (reserved, daemon-owned):\n\
+         #   $ADJ_NAME $ADJ_HOST\n\
+         #   $ADJ_URL $ADJ_URL_HTTP                  # https/http, clean (needs install-port-forward)\n\
+         #   $ADJ_URL_DIRECT $ADJ_URL_HTTP_DIRECT    # same, with the daemon's real ports\n\
+         # e.g. hugo: cmd = \"hugo server --appendPort=false --port $PORT --baseURL $ADJ_URL_HTTP\"\n"
     )
 }
 
@@ -275,6 +281,7 @@ mod tests {
         assert!(toml.contains("name = \"myapp\""), "{toml}");
         assert!(toml.contains("cmd = \"npm run dev\""), "{toml}");
         assert!(toml.contains("# port_env = \"PORT\""), "{toml}");
+        assert!(toml.contains("ADJ_URL_HTTP"), "{toml}");
         // The generated manifest must parse back through the real config reader.
         assert!(
             toml::from_str::<toml::Value>(&toml).is_ok(),

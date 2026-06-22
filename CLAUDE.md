@@ -73,6 +73,12 @@ health_check_url = "/healthz"
 idle_timeout = "15m"        # or "30s" / "1h" / "off". default 15m
 ```
 
+At boot the daemon injects a reserved, daemon-owned `ADJ_*` namespace into `cmd` (after
+`env_file`/`[env]`, so these win): `ADJ_NAME` (routing key), `ADJ_HOST` (`<name>.adj.ac`),
+and four base URLs — `ADJ_URL`/`ADJ_URL_HTTP` (clean, assume the port-forward) and
+`ADJ_URL_DIRECT`/`ADJ_URL_HTTP_DIRECT` (carrying the daemon's real listener ports). Lets a
+`cmd` address its own origin, e.g. `hugo server --appendPort=false --port $PORT --baseURL $ADJ_URL_HTTP`.
+
 Path canonicalization happens **client-side** in `add` — the daemon refuses non-absolute paths so it never silently resolves against its own CWD (it may have been launched by launchd from `/`).
 
 ### Privileged ops
