@@ -44,7 +44,7 @@ pub async fn run() -> Result<()> {
         .with_context(|| format!("binding socket at {}", socket.display()))?;
     tracing::info!("adj daemon listening at {}", socket.display());
 
-    let supervisor = Arc::new(Supervisor::new());
+    let supervisor = Arc::new(Supervisor::new(crate::supervisor::ProxyPorts::from_env()));
     let registry_lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
 
     // Best-effort cleanup of the socket on Ctrl-C so subsequent boots aren't blocked.
