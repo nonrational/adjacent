@@ -131,7 +131,7 @@ async fn boot_injects_adj_env_vars() {
             .await
             .expect("logs");
         let text = String::from_utf8_lossy(&out.stdout).to_string();
-        if text.contains("NAME=") {
+        if text.contains("NAME=alannorton-com") {
             break text;
         }
         if Instant::now() >= deadline {
