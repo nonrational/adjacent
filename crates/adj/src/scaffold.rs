@@ -54,11 +54,16 @@ fn sanitize_name(raw: &str) -> String {
 }
 
 /// Ordered, table-driven detection: first high-confidence signal wins. The order resolves
-/// ambiguity (a repo carrying both `deno.json` tasks and `package.json` scripts is treated as
-/// Deno). Stacks without a confident signal fall through to `None`; the caller turns that into
-/// a "set cmd yourself / add a detector" message rather than guessing.
+/// ambiguity by treating a named, framework-specific config as authoritative over a generic
+/// `package.json`: a repo carrying both `deno.json` tasks and `package.json` scripts is Deno, and
+/// a Hugo site whose `package.json` only manages asset deps is Hugo. Stacks without a confident
+/// signal fall through to `None`; the caller turns that into a "set cmd yourself / add a detector"
+/// message rather than guessing.
 fn detect_cmd(dir: &Path) -> Option<String> {
     if let Some(cmd) = detect_deno(dir) {
+        return Some(cmd);
+    }
+    if let Some(cmd) = detect_hugo(dir) {
         return Some(cmd);
     }
     if let Some(cmd) = detect_node(dir) {
@@ -93,6 +98,17 @@ fn detect_deno(dir: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// Hugo's site config is `hugo.{toml,yaml,yml,json}` (0.110+). We key only off those `hugo.*`
+/// names — a bare legacy `config.toml` is shared with too many other tools to claim confidently.
+/// `--appendPort=false` plus `--baseURL $ADJ_URL_HTTP` make Hugo emit absolute URLs that match how
+/// the proxy addresses the site (this is the worked example in the generated manifest's comments).
+fn detect_hugo(dir: &Path) -> Option<String> {
+    ["hugo.toml", "hugo.yaml", "hugo.yml", "hugo.json"]
+        .iter()
+        .any(|f| dir.join(f).is_file())
+        .then(|| "hugo server --appendPort=false --port $PORT --baseURL $ADJ_URL_HTTP".to_string())
 }
 
 fn detect_node(dir: &Path) -> Option<String> {
@@ -246,6 +262,43 @@ mod tests {
         write(d.path(), "deno.json", r#"{"tasks":{"dev":"x"}}"#);
         write(d.path(), "package.json", r#"{"scripts":{"dev":"vite"}}"#);
         assert_eq!(detect_cmd(d.path()).as_deref(), Some("deno task dev"));
+    }
+
+    #[test]
+    fn detects_hugo_from_named_config() {
+        let cmd = "hugo server --appendPort=false --port $PORT --baseURL $ADJ_URL_HTTP";
+        for cfg in ["hugo.toml", "hugo.yaml", "hugo.yml", "hugo.json"] {
+            let d = TempDir::new().unwrap();
+            write(d.path(), cfg, "");
+            assert_eq!(detect_cmd(d.path()).as_deref(), Some(cmd), "config {cfg}");
+        }
+    }
+
+    #[test]
+    fn hugo_wins_over_node_when_both_present() {
+        // A Hugo site commonly carries a package.json for asset deps; the named hugo config is
+        // authoritative, same as deno.json over package.json.
+        let d = TempDir::new().unwrap();
+        write(d.path(), "hugo.toml", "");
+        write(d.path(), "package.json", r#"{"scripts":{"dev":"vite"}}"#);
+        assert_eq!(
+            detect_cmd(d.path()).as_deref(),
+            Some("hugo server --appendPort=false --port $PORT --baseURL $ADJ_URL_HTTP")
+        );
+    }
+
+    #[test]
+    fn renders_hugo_manifest_as_valid_toml() {
+        // The detected command carries `$`, `=` and `--`; make sure it still round-trips.
+        let toml = render(
+            Some("site"),
+            Some("hugo server --appendPort=false --port $PORT --baseURL $ADJ_URL_HTTP"),
+        );
+        assert!(toml.contains("--baseURL $ADJ_URL_HTTP"), "{toml}");
+        assert!(
+            toml::from_str::<toml::Value>(&toml).is_ok(),
+            "invalid toml: {toml}"
+        );
     }
 
     #[test]
