@@ -96,7 +96,10 @@ fn adj_env(name: &str, http: Option<u16>, https: Option<u16>) -> Vec<(String, St
         vars.push(("ADJ_URL_DIRECT".to_string(), format!("https://{host}:{p}")));
     }
     if let Some(p) = http {
-        vars.push(("ADJ_URL_HTTP_DIRECT".to_string(), format!("http://{host}:{p}")));
+        vars.push((
+            "ADJ_URL_HTTP_DIRECT".to_string(),
+            format!("http://{host}:{p}"),
+        ));
     }
     vars
 }
@@ -567,7 +570,10 @@ mod tests {
         assert_eq!(vars["ADJ_URL"], "https://alannorton-com.adj.ac");
         assert_eq!(vars["ADJ_URL_HTTP"], "http://alannorton-com.adj.ac");
         assert_eq!(vars["ADJ_URL_DIRECT"], "https://alannorton-com.adj.ac:8443");
-        assert_eq!(vars["ADJ_URL_HTTP_DIRECT"], "http://alannorton-com.adj.ac:8080");
+        assert_eq!(
+            vars["ADJ_URL_HTTP_DIRECT"],
+            "http://alannorton-com.adj.ac:8080"
+        );
     }
 
     #[test]

@@ -142,8 +142,14 @@ async fn boot_injects_adj_env_vars() {
 
     assert!(logs.contains("NAME=alannorton-com"), "logs: {logs}");
     assert!(logs.contains("HOST=alannorton-com.adj.ac"), "logs: {logs}");
-    assert!(logs.contains("URL=https://alannorton-com.adj.ac"), "logs: {logs}");
-    assert!(logs.contains("HTTP=http://alannorton-com.adj.ac"), "logs: {logs}");
+    assert!(
+        logs.contains("URL=https://alannorton-com.adj.ac"),
+        "logs: {logs}"
+    );
+    assert!(
+        logs.contains("HTTP=http://alannorton-com.adj.ac"),
+        "logs: {logs}"
+    );
     assert!(
         logs.contains("DIRECT=https://alannorton-com.adj.ac:18443"),
         "logs: {logs}"
