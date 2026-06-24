@@ -18,7 +18,7 @@ Homepage: [adj.ac/ent](https://adj.ac/ent)
 
 - **Readiness before forwarding.** Default is TCP-connect; opt into HTTP probing with `health_check_url = "/healthz"`. The proxy never forwards to a half-booted process. Agents can block on this explicitly with `adj wait-ready`.
 
-- **The daemon owns ports.** `$PORT` is injected into the boot command; the app binds where it's told. Apps that need a different variable name set `port_env = "BIND_PORT"`.
+- **The daemon owns ports.** `$PORT` is injected into the boot command; the app binds where it's told. Apps that need a different variable name set `port_env = "BIND_PORT"`. The daemon also injects an `ADJ_*` namespace — the app's own host and URLs (see [Boot environment](#boot-environment)).
 
 - **Logs are JSONL on disk.** `~/.adjacent/logs/<name>.log` is the source of truth. `adj logs` projects them for humans; `adj logs --json` streams them as-is.
 
@@ -116,6 +116,23 @@ Three things make this the shape that works:
 - **`--rm` and `--init`.** `--rm` keeps stopped containers from piling up. `--init` makes SIGTERM reach the app even when the image's entrypoint doesn't forward signals.
 
 One caveat: if a container ignores SIGTERM through the grace window, the follow-up SIGKILL kills the docker _client_ — the container keeps running under the Docker daemon. Naming it (`--name`) makes a leaked one easy to spot and `docker stop`.
+
+## Boot environment
+
+At boot the daemon injects a reserved `ADJ_*` namespace into `cmd` — the app's own external
+identity and URLs. These are daemon-owned: they land after `env_file` and `[env]`, so they win.
+
+- `$ADJ_NAME` — the routing key (`feature-x.site` for a worktree instance, otherwise the app name)
+- `$ADJ_HOST` — `<name>.adj.ac`
+- `$ADJ_URL` / `$ADJ_URL_HTTP` — clean base URL, https/http. Assumes `adj install-port-forward` so `:443` / `:80` reach the proxy.
+- `$ADJ_URL_DIRECT` / `$ADJ_URL_HTTP_DIRECT` — same host, carrying the daemon's real listener ports (`:8443` / `:8080`) for when the forward isn't installed.
+
+This lets a `cmd` address its own origin — handy for tools that bake an absolute base URL into
+their output:
+
+```toml
+cmd = "hugo server --appendPort=false --port $PORT --baseURL $ADJ_URL_HTTP"
+```
 
 ## Local Development
 

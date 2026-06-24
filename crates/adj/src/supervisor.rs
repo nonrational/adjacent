@@ -23,9 +23,90 @@ use crate::registry::{idle_timeout_for, AppConfig};
 const TERM_GRACE: Duration = Duration::from_secs(5);
 const PORT_ALLOC_ATTEMPTS: usize = 32;
 
-#[derive(Default)]
+/// The proxy's externally-reachable listener ports, resolved at boot for the `ADJ_*` URLs.
+///
+/// Holds the *configured* values (`ADJACENT_PROXY_PORT` / `ADJACENT_HTTPS_PORT`, default
+/// 8080/8443). A non-zero configured port is authoritative. Only the kernel-assigned case
+/// (`0`, used by the test sandboxes) consults the port file the listener wrote after binding
+/// — the same env-or-file discovery other processes use to find this daemon. Resolution is
+/// deferred to `up()` time, not construction: at construction the listeners haven't bound, so
+/// a `0` port has no value yet.
+pub struct ProxyPorts {
+    http_configured: u16,
+    https_configured: u16,
+}
+
+impl Default for ProxyPorts {
+    fn default() -> Self {
+        Self {
+            http_configured: 8080,
+            https_configured: 8443,
+        }
+    }
+}
+
+impl ProxyPorts {
+    pub fn from_env() -> Self {
+        Self {
+            http_configured: crate::proxy::proxy_port(),
+            https_configured: crate::proxy::https_port(),
+        }
+    }
+
+    pub fn http(&self) -> Option<u16> {
+        if self.http_configured != 0 {
+            Some(self.http_configured)
+        } else {
+            read_port_file(paths::proxy_port_path())
+        }
+    }
+
+    pub fn https(&self) -> Option<u16> {
+        if self.https_configured != 0 {
+            Some(self.https_configured)
+        } else {
+            read_port_file(paths::https_port_path())
+        }
+    }
+}
+
+/// Read a kernel-assigned port back from a listener's port file. Best-effort: a missing or
+/// unparseable file (the HTTPS listener that never bound, say) yields `None`, which drops the
+/// corresponding `_DIRECT` URL rather than pointing it at a dead port.
+fn read_port_file(path: Result<PathBuf>) -> Option<u16> {
+    let path = path.ok()?;
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// Build the daemon-owned `ADJ_*` boot variables for an app addressed at `name` (the routing
+/// key — carries the worktree label when present). `http`/`https` are the proxy's
+/// externally-reachable listener ports, already resolved. A `None` port drops the matching
+/// `_DIRECT` URL rather than pointing it at a dead port; the portless canonical URLs always
+/// appear. `http` is `None` only in pathological cases (the HTTP listener always binds), but
+/// it is guarded symmetrically.
+fn adj_env(name: &str, http: Option<u16>, https: Option<u16>) -> Vec<(String, String)> {
+    let host = format!("{name}{}", crate::proxy::HOST_SUFFIX);
+    let mut vars = vec![
+        ("ADJ_NAME".to_string(), name.to_string()),
+        ("ADJ_HOST".to_string(), host.clone()),
+        ("ADJ_URL".to_string(), format!("https://{host}")),
+        ("ADJ_URL_HTTP".to_string(), format!("http://{host}")),
+    ];
+    if let Some(p) = https {
+        vars.push(("ADJ_URL_DIRECT".to_string(), format!("https://{host}:{p}")));
+    }
+    if let Some(p) = http {
+        vars.push((
+            "ADJ_URL_HTTP_DIRECT".to_string(),
+            format!("http://{host}:{p}"),
+        ));
+    }
+    vars
+}
+
 pub struct Supervisor {
     inner: Arc<Mutex<Inner>>,
+    proxy_ports: ProxyPorts,
 }
 
 #[derive(Default)]
@@ -53,8 +134,11 @@ struct AppRuntime {
 }
 
 impl Supervisor {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(proxy_ports: ProxyPorts) -> Self {
+        Self {
+            inner: Arc::default(),
+            proxy_ports,
+        }
     }
 
     pub async fn state(&self, name: &str) -> AppState {
@@ -120,6 +204,15 @@ impl Supervisor {
             }
         }
         command.env(port_env, port.to_string());
+        // Daemon-owned ADJ_* namespace: the app's own external identity and URLs. Injected
+        // after env_file/[env] so these authoritative values win over anything a user set.
+        // `name` is the routing key, so the host and URLs address the exact vhost the proxy
+        // serves (worktree label included). Resolving the proxy ports here may read a port
+        // file, but only in the kernel-assigned (`0`) sandbox case; the default daemon uses
+        // the configured constants and touches no file.
+        for (k, v) in adj_env(&name, self.proxy_ports.http(), self.proxy_ports.https()) {
+            command.env(k, v);
+        }
         // Put the shell and everything it spawns in its own process group so we can signal
         // the whole tree on stop. Without this, SIGTERM/SIGKILL hit only `sh` and the real
         // long-running command (e.g. a dev server) is reparented to init and keeps the port.
@@ -422,13 +515,36 @@ impl Supervisor {
 mod tests {
     use super::*;
 
+    #[test]
+    fn proxy_ports_configured_value_wins_without_touching_files() {
+        // Non-zero configured ports are authoritative — no port-file read needed. This is the
+        // path the real daemon takes (defaults 8080/8443).
+        let p = ProxyPorts::default();
+        assert_eq!(p.http(), Some(8080));
+        assert_eq!(p.https(), Some(8443));
+    }
+
+    #[test]
+    fn read_port_file_parses_present_file_and_none_otherwise() {
+        use std::io::Write;
+        // Present + parseable → the kernel-assigned port written back by the listener.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("proxy.port");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "54321").unwrap();
+        assert_eq!(read_port_file(Ok(path.clone())), Some(54321));
+
+        // Absent file → None (HTTPS listener that never bound, e.g. no CA).
+        assert_eq!(read_port_file(Ok(dir.path().join("missing.port"))), None);
+    }
+
     #[tokio::test]
     async fn down_if_idle_skips_when_request_arrived_after_snapshot() {
         // Scenario: the idle scanner observed `last_request` older than the window, then a
         // proxied request landed and bumped `last_request` to ~now. By the time the scanner
         // asks the supervisor to stop the app, the window is no longer satisfied. The guard
         // re-checks under the lock and returns Ok(false), leaving the app alone.
-        let sup = Supervisor::new();
+        let sup = Supervisor::new(ProxyPorts::default());
         sup.insert_fake_running("hot", Instant::now()).await;
         let result = sup
             .down_if_idle("hot", Duration::from_secs(30))
@@ -443,11 +559,50 @@ mod tests {
         assert!(matches!(sup.state("hot").await, AppState::Running { .. }));
     }
 
+    #[test]
+    fn adj_env_builds_all_six_vars() {
+        let vars: std::collections::HashMap<String, String> =
+            adj_env("alannorton-com", Some(8080), Some(8443))
+                .into_iter()
+                .collect();
+        assert_eq!(vars["ADJ_NAME"], "alannorton-com");
+        assert_eq!(vars["ADJ_HOST"], "alannorton-com.adj.ac");
+        assert_eq!(vars["ADJ_URL"], "https://alannorton-com.adj.ac");
+        assert_eq!(vars["ADJ_URL_HTTP"], "http://alannorton-com.adj.ac");
+        assert_eq!(vars["ADJ_URL_DIRECT"], "https://alannorton-com.adj.ac:8443");
+        assert_eq!(
+            vars["ADJ_URL_HTTP_DIRECT"],
+            "http://alannorton-com.adj.ac:8080"
+        );
+    }
+
+    #[test]
+    fn adj_env_uses_routing_key_for_worktree_instances() {
+        // A worktree instance is keyed `<label>.<name>` and routes at `<label>.<name>.adj.ac`.
+        let vars: std::collections::HashMap<String, String> =
+            adj_env("feature-x.site", Some(8080), Some(8443))
+                .into_iter()
+                .collect();
+        assert_eq!(vars["ADJ_NAME"], "feature-x.site");
+        assert_eq!(vars["ADJ_HOST"], "feature-x.site.adj.ac");
+        assert_eq!(vars["ADJ_URL"], "https://feature-x.site.adj.ac");
+    }
+
+    #[test]
+    fn adj_env_omits_https_direct_when_port_unresolved() {
+        let vars: std::collections::HashMap<String, String> =
+            adj_env("site", Some(8080), None).into_iter().collect();
+        assert!(!vars.contains_key("ADJ_URL_DIRECT"));
+        // The portless canonical https URL and the http direct URL still appear.
+        assert_eq!(vars["ADJ_URL"], "https://site.adj.ac");
+        assert_eq!(vars["ADJ_URL_HTTP_DIRECT"], "http://site.adj.ac:8080");
+    }
+
     #[tokio::test]
     async fn down_if_idle_skips_when_app_missing() {
         // Idle scanner snapshot can name an app that's since been removed; the guard treats
         // missing entries as "skip" rather than an error so the scanner loop stays quiet.
-        let sup = Supervisor::new();
+        let sup = Supervisor::new(ProxyPorts::default());
         let result = sup
             .down_if_idle("ghost", Duration::from_secs(0))
             .await

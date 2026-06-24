@@ -25,7 +25,7 @@ use crate::tls;
 
 const PROXY_PORT_ENV: &str = "ADJACENT_PROXY_PORT";
 const HTTPS_PORT_ENV: &str = "ADJACENT_HTTPS_PORT";
-const HOST_SUFFIX: &str = ".adj.ac";
+pub const HOST_SUFFIX: &str = ".adj.ac";
 pub const DEFAULT_BOOT_TIMEOUT_SECS: u64 = 60;
 pub const READY_POLL_INTERVAL: Duration = Duration::from_millis(200);
 

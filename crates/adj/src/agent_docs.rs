@@ -94,6 +94,16 @@ When you edit code that does not hot-reload:
 - `adj up {name}` — boot now.
 - `adj down {name}` — stop now (SIGTERM, then SIGKILL after a grace period).
 
+## Boot environment
+
+Adjacent injects these into `{name}`'s `cmd` at boot (reserved `ADJ_*` namespace,
+daemon-owned — they win over `env_file` / `[env]`):
+
+- `$ADJ_NAME` — `{name}` (the routing key)
+- `$ADJ_HOST` — `{name}.adj.ac`
+- `$ADJ_URL` / `$ADJ_URL_HTTP` — clean base URL (assumes `adj install-port-forward`)
+- `$ADJ_URL_DIRECT` / `$ADJ_URL_HTTP_DIRECT` — same, carrying the daemon's real listener ports
+
 ## JSON output
 
 Every read command (`list`, `status`, `logs`) accepts `--json` for a stable,
