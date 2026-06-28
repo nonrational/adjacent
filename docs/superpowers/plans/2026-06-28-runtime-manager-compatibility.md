@@ -300,6 +300,9 @@ EXPECT_LAUNCHD=fallback
 #!/usr/bin/env bash
 # Install mise + pinned python via shims. Echoes PATH additions for the shell context.
 set -euo pipefail
+# mise's python-build-standalone attestation verification fails in clean CI
+# environments (no GitHub OIDC token / network path to attestation endpoint).
+export MISE_PYTHON_GITHUB_ATTESTATIONS=false
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 if ! command -v mise >/dev/null 2>&1; then
