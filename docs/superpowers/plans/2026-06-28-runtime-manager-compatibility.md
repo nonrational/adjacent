@@ -24,7 +24,8 @@
 - **Expectations** (`cell.env` per fixture): each context has an expectation the harness asserts:
   - `resolved` → observed version MUST equal the pin.
   - `fallback` → observed version MUST NOT equal the pin (a system/global toolchain stood in).
-  - `record` → unknown; always pass, just log observed (used for the ❓ `mise exec`/`mise run`/`uv` launchd cells until we have data).
+  - `unbootable` → the app MUST NOT boot at all (runtime unresolvable AND no system fallback, e.g. a Node manager under a launchd PATH with no `/usr/bin/node`). A missing version satisfies it; a present version violates it.
+  - `record` → unknown; always pass, just log observed (was used for the ❓ `mise exec`/`mise run`/`uv` launchd cells until the first CI run; all three resolved, so they are now pinned to `resolved`).
 - **HTTPS:** set `ADJACENT_HTTPS_PORT=0`; with no CA installed the HTTPS task logs an error and exits while HTTP keeps serving — exactly what we want, no CA setup needed.
 
 ---
@@ -242,11 +243,22 @@ start_daemon "$CONTEXT" "$EXTRA"
 OBSERVED_RAW="$(fetch_version || echo "BOOT_FAILED")"
 OBSERVED="$(printf '%s' "$OBSERVED_RAW" | awk '{print $2}')"   # second field = version
 
-# A failed boot must never satisfy a `fallback` (or `record`) expectation — that
-# would be a false green. `fallback` means "booted with the wrong runtime", not
-# "never booted". A missing version is a hard failure regardless of expectation.
+# No version observed = the app never booted. This satisfies ONLY the
+# `unbootable` expectation (runtime unresolvable AND no system fallback). For
+# resolved/fallback/record it is a hard failure, never a false green:
+# `fallback` means "booted with the wrong runtime", not "never booted".
 if [ "$OBSERVED_RAW" = "BOOT_FAILED" ] || [ -z "$OBSERVED" ]; then
+  if [ "$EXPECT" = "unbootable" ]; then
+    echo "RESULT manager=$MANAGER context=$CONTEXT pin=$PIN observed=none expect=$EXPECT status=pass"
+    exit 0
+  fi
   echo "RESULT manager=$MANAGER context=$CONTEXT pin=$PIN observed=none expect=$EXPECT status=fail"
+  exit 1
+fi
+
+# A version WAS observed, so an `unbootable` expectation is now violated.
+if [ "$EXPECT" = "unbootable" ]; then
+  echo "RESULT manager=$MANAGER context=$CONTEXT pin=$PIN observed=$OBSERVED expect=$EXPECT status=fail"
   exit 1
 fi
 
@@ -468,7 +480,7 @@ MANAGER=asdf
 RUNTIME=node
 PIN=18.20.5
 EXPECT_SHELL=resolved
-EXPECT_LAUNCHD=fallback
+EXPECT_LAUNCHD=unbootable
 ```
 
 `setup.sh`:
@@ -613,7 +625,7 @@ MANAGER=mise-exec
 RUNTIME=node
 PIN=18.20.5
 EXPECT_SHELL=resolved
-EXPECT_LAUNCHD=record
+EXPECT_LAUNCHD=resolved
 ```
 
 `setup.sh`:
@@ -686,7 +698,7 @@ MANAGER=mise-run
 RUNTIME=ruby
 PIN=3.3.6
 EXPECT_SHELL=resolved
-EXPECT_LAUNCHD=record
+EXPECT_LAUNCHD=resolved
 ```
 
 `setup.sh`:
@@ -754,7 +766,7 @@ MANAGER=uv
 RUNTIME=python
 PIN=3.11.9
 EXPECT_SHELL=resolved
-EXPECT_LAUNCHD=record
+EXPECT_LAUNCHD=resolved
 ```
 
 `setup.sh`:
@@ -822,7 +834,7 @@ MANAGER=nvm
 RUNTIME=node
 PIN=18.20.5
 EXPECT_SHELL=fallback
-EXPECT_LAUNCHD=fallback
+EXPECT_LAUNCHD=unbootable
 ```
 
 `setup.sh` — installs nvm and a DIFFERENT default node (22.x) so the fallback is observable, plus the pinned 18.20.5 (to prove even the installed-but-not-selected version isn't auto-chosen):

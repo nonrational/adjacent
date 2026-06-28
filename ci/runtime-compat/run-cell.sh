@@ -27,11 +27,24 @@ start_daemon "$CONTEXT" "$EXTRA"
 OBSERVED_RAW="$(fetch_version || echo "BOOT_FAILED")"
 OBSERVED="$(printf '%s' "$OBSERVED_RAW" | awk '{print $2}')"   # second field = version
 
-# A failed boot must never satisfy a `fallback` (or `record`) expectation — that
-# would be a false green. `fallback` means "booted with the wrong runtime", not
-# "never booted". A missing version is a hard failure regardless of expectation.
+# No version observed = the app never booted. This satisfies ONLY the
+# `unbootable` expectation (the runtime is unresolvable AND there is no system
+# fallback to stand in — e.g. a Node manager under a launchd PATH with no
+# /usr/bin/node). For resolved/fallback/record it is a hard failure, never a
+# false green: `fallback` means "booted with the wrong runtime", not "never
+# booted".
 if [ "$OBSERVED_RAW" = "BOOT_FAILED" ] || [ -z "$OBSERVED" ]; then
+  if [ "$EXPECT" = "unbootable" ]; then
+    echo "RESULT manager=$MANAGER context=$CONTEXT pin=$PIN observed=none expect=$EXPECT status=pass"
+    exit 0
+  fi
   echo "RESULT manager=$MANAGER context=$CONTEXT pin=$PIN observed=none expect=$EXPECT status=fail"
+  exit 1
+fi
+
+# A version WAS observed, so an `unbootable` expectation is now violated.
+if [ "$EXPECT" = "unbootable" ]; then
+  echo "RESULT manager=$MANAGER context=$CONTEXT pin=$PIN observed=$OBSERVED expect=$EXPECT status=fail"
   exit 1
 fi
 

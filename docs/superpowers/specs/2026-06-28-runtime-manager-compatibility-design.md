@@ -153,6 +153,52 @@ plist for the daemon, boot one fixture, confirm it serves.
 the pinned version, the observed version, and pass/fail. That table is the
 deliverable that drives the fix-vs-document decision.
 
+## Observed results (2026-06-28 CI run, `ubuntu-latest` + `macos-14`)
+
+First full run on PR #77. All 16 cells now pass against their recalibrated
+expectations; the macOS real-launchd smoke job is green.
+
+| Manager / mode | shell (observed) | launchd (observed) | launchd verdict |
+|---|---|---|---|
+| rbenv | 3.3.6 → **resolved** | 3.2.3 (system) → **fallback** | shim absent, system ruby stands in |
+| asdf (node) | 18.20.5 → **resolved** | none → **unbootable** | no `node` on bare PATH at all |
+| mise (shim) | 3.11.9 → **resolved** | 3.12.3 (system) → **fallback** | shim absent, system python stands in |
+| mise (`mise activate`) — *Berkopec* | 3.2.3 (system) → **fallback** | 3.2.3 → **fallback** | activation hook never fires under `sh -c` |
+| mise exec | 18.20.5 → **resolved** | 18.20.5 → **resolved** | self-resolves with only the `mise` binary on PATH |
+| mise run — *Berkopec remedy* | 3.3.6 → **resolved** | 3.3.6 → **resolved** | self-resolves with only the `mise` binary on PATH |
+| uv (`uv run`) | 3.11.9 → **resolved** | 3.11.9 → **resolved** | self-resolves with only the `uv` binary on PATH |
+| nvm | 22.23.1 (default) → **fallback** | none → **unbootable** | shell function, no per-dir resolution; no `node` on bare PATH |
+
+### Headline findings
+
+1. **The exec-wrapped workaround survives launchd.** `mise exec`, `mise run`
+   (the Berkopec remedy), and `uv run` all resolved their pinned runtime under a
+   bare launchd PATH, given only the manager binary on `PATH`. This is the
+   actionable advice for a `mise activate` user: drive the app cmd through
+   `mise run <task>` / `mise exec` rather than relying on shell activation.
+
+2. **Ruby falls back; Node is unbootable.** Under launchd-minimal, shim-based
+   managers lose their shims, but the *result* differs by ecosystem: `ubuntu`
+   ships `/usr/bin/ruby`, so rbenv/mise-activate fall back to system Ruby (wrong
+   version, but it boots); there is **no `/usr/bin/node`**, so asdf/nvm Node apps
+   crash with `exit 127` — they don't fall back, they don't boot. The design
+   guessed `fallback` for these; reality is `unbootable`, now recorded as a
+   distinct expectation (a missing version satisfies `unbootable`; a present one
+   violates it — so it can't false-green).
+
+3. **`mise activate` confirmed broken under `adj`** (the Berkopec profile): the
+   `--on-variable PWD` hook never fires under `sh -c`, so the app got system Ruby
+   (3.2.3), not the pinned 3.3.6 — in **both** contexts.
+
+### Fix-vs-document call (open for the human)
+
+The two `unbootable` Node cells are documented as expected, not flagged as an
+`adj` bug — a launchd-started daemon inheriting a bare PATH genuinely has no way
+to find an unshimmed `node`. Whether `adj` should *help* here (document the
+"put your runtime on the daemon's PATH" requirement, or add a PATH-augmentation
+knob / `mise exec` convenience) is a product decision, deliberately left as
+follow-up per "Out of scope" below.
+
 ## Out of scope
 
 - Any change to how `adj` spawns apps or resolves environments. If the matrix
