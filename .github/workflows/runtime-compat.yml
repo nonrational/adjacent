@@ -84,3 +84,48 @@ jobs:
           grep -rh '^RESULT ' results | sort >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           cat "$GITHUB_STEP_SUMMARY"
+
+  macos-launchd-smoke:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92.0"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build adj
+        run: cargo build -p adj
+      - name: Boot the mise-run fixture under a real launchd agent
+        run: |
+          set -euo pipefail
+          export ADJ_BIN="$PWD/target/debug/adj"
+          cell="ci/runtime-compat/fixtures/mise-run-ruby"
+          eval "$("$cell/setup.sh" | grep -E '^(SHELL_PATH_ADD|LAUNCHD_EXTRA_PATH)=' | sed 's/^/export /')"
+          home="$(mktemp -d)"
+          label="ac.adj.smoke"
+          plist="$HOME/Library/LaunchAgents/$label.plist"
+          mkdir -p "$(dirname "$plist")"
+          cat > "$plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>Label</key><string>$label</string>
+            <key>ProgramArguments</key><array>
+              <string>$ADJ_BIN</string><string>daemon</string></array>
+            <key>EnvironmentVariables</key><dict>
+              <key>ADJACENT_HOME</key><string>$home</string>
+              <key>ADJACENT_PROXY_PORT</key><string>0</string>
+              <key>ADJACENT_HTTPS_PORT</key><string>0</string>
+              <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin</string>
+            </dict>
+            <key>RunAtLoad</key><true/>
+          </dict></plist>
+          PLIST
+          launchctl load "$plist"
+          for i in $(seq 1 100); do [ -s "$home/proxy.port" ] && break; sleep 0.1; done
+          port="$(cat "$home/proxy.port")"
+          "$ADJ_BIN" add "$(cd "$cell" && pwd)"
+          out="$(curl -fsS --max-time 120 -H 'Host: app.adj.ac' "http://127.0.0.1:$port/")"
+          echo "launchd smoke observed: $out"
+          launchctl unload "$plist"
+          case "$out" in RUBY*) echo "smoke OK" ;; *) echo "smoke FAILED" >&2; exit 1 ;; esac
