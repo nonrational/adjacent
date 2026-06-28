@@ -1,0 +1,86 @@
+name: runtime-compat
+
+on:
+  pull_request:
+    paths:
+      - "ci/runtime-compat/**"
+      - ".github/workflows/runtime-compat.yml"
+      - "crates/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cell:
+    strategy:
+      fail-fast: false
+      matrix:
+        fixture:
+          - mise-shim-python
+          - rbenv-ruby
+          - asdf-node
+          - mise-activate-ruby
+          - mise-exec-node
+          - mise-run-ruby
+          - uv-python
+          - nvm-node
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92.0"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build adj
+        run: cargo build -p adj
+
+      - name: Cache manager installs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rbenv
+            ~/.asdf
+            ~/.nvm
+            ~/.local/share/mise
+            ~/.local/share/uv
+            ~/.local/bin
+          key: rtcompat-${{ matrix.fixture }}-${{ hashFiles(format('ci/runtime-compat/fixtures/{0}/setup.sh', matrix.fixture)) }}
+
+      - name: Run cell (both contexts)
+        run: |
+          set -euo pipefail
+          export ADJ_BIN="$PWD/target/debug/adj"
+          cell="ci/runtime-compat/fixtures/${{ matrix.fixture }}"
+          eval "$("$cell/setup.sh" | grep -E '^(SHELL_PATH_ADD|LAUNCHD_EXTRA_PATH)=' | sed 's/^/export /')"
+          mkdir -p results
+          PATH="$SHELL_PATH_ADD:$PATH" \
+            ci/runtime-compat/run-cell.sh "$cell" shell   | tee results/${{ matrix.fixture }}-shell.txt
+          ci/runtime-compat/run-cell.sh "$cell" launchd   | tee results/${{ matrix.fixture }}-launchd.txt
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ matrix.fixture }}
+          path: results/
+
+  matrix-report:
+    needs: cell
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: results
+      - name: Print observed matrix
+        run: |
+          echo "## Runtime-manager compatibility matrix" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep -rh '^RESULT ' results | sort >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat "$GITHUB_STEP_SUMMARY"
