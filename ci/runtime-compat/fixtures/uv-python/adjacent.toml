@@ -1,0 +1,3 @@
+name = "app"
+cmd = "uv run --python 3.11.9 python ../../servers/server.py"
+boot_timeout = 180
