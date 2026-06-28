@@ -56,7 +56,10 @@ jobs:
           set -euo pipefail
           export ADJ_BIN="$PWD/target/debug/adj"
           cell="ci/runtime-compat/fixtures/${{ matrix.fixture }}"
-          eval "$("$cell/setup.sh" | grep -E '^(SHELL_PATH_ADD|LAUNCHD_EXTRA_PATH)=' | sed 's/^/export /')"
+          # Run setup in-pipeline (not inside $()) so a failed install aborts the
+          # job via `set -o pipefail` instead of being masked by command substitution.
+          "$cell/setup.sh" | tee setup.out
+          eval "$(grep -E '^(SHELL_PATH_ADD|LAUNCHD_EXTRA_PATH)=' setup.out | sed 's/^/export /')"
           mkdir -p results
           PATH="$SHELL_PATH_ADD:$PATH" \
             ci/runtime-compat/run-cell.sh "$cell" shell   | tee results/${{ matrix.fixture }}-shell.txt
@@ -100,8 +103,12 @@ jobs:
           set -euo pipefail
           export ADJ_BIN="$PWD/target/debug/adj"
           cell="ci/runtime-compat/fixtures/mise-run-ruby"
-          eval "$("$cell/setup.sh" | grep -E '^(SHELL_PATH_ADD|LAUNCHD_EXTRA_PATH)=' | sed 's/^/export /')"
+          # Run setup in-pipeline (not inside $()) so a failed install aborts the
+          # job via `set -o pipefail` instead of being masked by command substitution.
+          "$cell/setup.sh" | tee setup.out
+          eval "$(grep -E '^(SHELL_PATH_ADD|LAUNCHD_EXTRA_PATH)=' setup.out | sed 's/^/export /')"
           home="$(mktemp -d)"
+          export ADJACENT_HOME="$home"   # the client (adj add) must target the daemon's socket
           label="ac.adj.smoke"
           plist="$HOME/Library/LaunchAgents/$label.plist"
           mkdir -p "$(dirname "$plist")"

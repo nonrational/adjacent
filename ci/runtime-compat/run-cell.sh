@@ -27,6 +27,14 @@ start_daemon "$CONTEXT" "$EXTRA"
 OBSERVED_RAW="$(fetch_version || echo "BOOT_FAILED")"
 OBSERVED="$(printf '%s' "$OBSERVED_RAW" | awk '{print $2}')"   # second field = version
 
+# A failed boot must never satisfy a `fallback` (or `record`) expectation — that
+# would be a false green. `fallback` means "booted with the wrong runtime", not
+# "never booted". A missing version is a hard failure regardless of expectation.
+if [ "$OBSERVED_RAW" = "BOOT_FAILED" ] || [ -z "$OBSERVED" ]; then
+  echo "RESULT manager=$MANAGER context=$CONTEXT pin=$PIN observed=none expect=$EXPECT status=fail"
+  exit 1
+fi
+
 assert_expectation "$EXPECT" "$OBSERVED" "$PIN"
-echo "RESULT manager=$MANAGER context=$CONTEXT pin=$PIN observed=${OBSERVED:-none} expect=$EXPECT status=$RESULT_STATUS"
+echo "RESULT manager=$MANAGER context=$CONTEXT pin=$PIN observed=$OBSERVED expect=$EXPECT status=$RESULT_STATUS"
 [ "$RESULT_STATUS" = "pass" ]

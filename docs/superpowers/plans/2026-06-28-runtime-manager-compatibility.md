@@ -235,8 +235,16 @@ start_daemon "$CONTEXT" "$EXTRA"
 OBSERVED_RAW="$(fetch_version || echo "BOOT_FAILED")"
 OBSERVED="$(printf '%s' "$OBSERVED_RAW" | awk '{print $2}')"   # second field = version
 
+# A failed boot must never satisfy a `fallback` (or `record`) expectation — that
+# would be a false green. `fallback` means "booted with the wrong runtime", not
+# "never booted". A missing version is a hard failure regardless of expectation.
+if [ "$OBSERVED_RAW" = "BOOT_FAILED" ] || [ -z "$OBSERVED" ]; then
+  echo "RESULT manager=$MANAGER context=$CONTEXT pin=$PIN observed=none expect=$EXPECT status=fail"
+  exit 1
+fi
+
 assert_expectation "$EXPECT" "$OBSERVED" "$PIN"
-echo "RESULT manager=$MANAGER context=$CONTEXT pin=$PIN observed=${OBSERVED:-none} expect=$EXPECT status=$RESULT_STATUS"
+echo "RESULT manager=$MANAGER context=$CONTEXT pin=$PIN observed=$OBSERVED expect=$EXPECT status=$RESULT_STATUS"
 [ "$RESULT_STATUS" = "pass" ]
 ```
 
@@ -962,7 +970,10 @@ jobs:
           set -euo pipefail
           export ADJ_BIN="$PWD/target/debug/adj"
           cell="ci/runtime-compat/fixtures/${{ matrix.fixture }}"
-          eval "$("$cell/setup.sh" | grep -E '^(SHELL_PATH_ADD|LAUNCHD_EXTRA_PATH)=' | sed 's/^/export /')"
+          # Run setup in-pipeline (not inside $()) so a failed install aborts the
+          # job via `set -o pipefail` instead of being masked by command substitution.
+          "$cell/setup.sh" | tee setup.out
+          eval "$(grep -E '^(SHELL_PATH_ADD|LAUNCHD_EXTRA_PATH)=' setup.out | sed 's/^/export /')"
           mkdir -p results
           PATH="$SHELL_PATH_ADD:$PATH" \
             ci/runtime-compat/run-cell.sh "$cell" shell   | tee results/${{ matrix.fixture }}-shell.txt
@@ -1035,8 +1046,12 @@ Append to `.github/workflows/runtime-compat.yml`:
           set -euo pipefail
           export ADJ_BIN="$PWD/target/debug/adj"
           cell="ci/runtime-compat/fixtures/mise-run-ruby"
-          eval "$("$cell/setup.sh" | grep -E '^(SHELL_PATH_ADD|LAUNCHD_EXTRA_PATH)=' | sed 's/^/export /')"
+          # Run setup in-pipeline (not inside $()) so a failed install aborts the
+          # job via `set -o pipefail` instead of being masked by command substitution.
+          "$cell/setup.sh" | tee setup.out
+          eval "$(grep -E '^(SHELL_PATH_ADD|LAUNCHD_EXTRA_PATH)=' setup.out | sed 's/^/export /')"
           home="$(mktemp -d)"
+          export ADJACENT_HOME="$home"   # the client (adj add) must target the daemon's socket
           label="ac.adj.smoke"
           plist="$HOME/Library/LaunchAgents/$label.plist"
           mkdir -p "$(dirname "$plist")"
