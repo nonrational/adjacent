@@ -41,9 +41,16 @@ start_daemon() {
 }
 
 stop_daemon() {
+  # Preserve the script's pending exit status: this runs from an EXIT trap, and
+  # bash would otherwise make the trap's last command (wait on the SIGTERMed
+  # daemon, status 143) the script's exit code — masking pass(0)/fail(1).
+  local status=$?
   [ -n "${DAEMON_PID:-}" ] && kill "$DAEMON_PID" 2>/dev/null
-  wait "$DAEMON_PID" 2>/dev/null
+  # || true: set -e is active in the EXIT trap; without it, wait's 143 exit
+  # status would abort the function before return "$status" executes.
+  wait "$DAEMON_PID" 2>/dev/null || true
   [ -n "${ADJACENT_HOME:-}" ] && rm -rf "$ADJACENT_HOME"
+  return "$status"
 }
 
 # Request app.adj.ac through the proxy; first hit lazy-boots the app.
