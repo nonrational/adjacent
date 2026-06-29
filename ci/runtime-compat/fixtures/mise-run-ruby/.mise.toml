@@ -1,0 +1,5 @@
+[tools]
+ruby = "3.3.6"
+
+[tasks.dev]
+run = "ruby ../../servers/server.rb"

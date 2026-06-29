@@ -1,0 +1,3 @@
+name = "app"
+cmd = "ruby ../../servers/server.rb"
+boot_timeout = 300

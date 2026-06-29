@@ -1,0 +1,3 @@
+name = "app"
+cmd = "node ../../servers/server.js"
+boot_timeout = 120

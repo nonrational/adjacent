@@ -1,0 +1,3 @@
+name = "app"
+cmd = "mise run dev"
+boot_timeout = 300
