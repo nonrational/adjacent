@@ -117,6 +117,12 @@ async fn write_app_with_boot_timeout(dir: &Path, name: &str, cmd: &str, boot_tim
     tokio::fs::write(manifest, body).await.expect("write toml");
 }
 
+async fn write_app_with_idle_timeout(dir: &Path, name: &str, cmd: &str, idle_timeout: &str) {
+    let manifest = dir.join("adjacent.toml");
+    let body = format!("name = \"{name}\"\ncmd = {cmd:?}\nidle_timeout = \"{idle_timeout}\"\n");
+    tokio::fs::write(manifest, body).await.expect("write toml");
+}
+
 /// Write a tiny multi-connection HTTP echo to `dir/server.py` and return the shell command
 /// that runs it. A real (threaded) server is required because the proxy's tcp-ready probe plus
 /// the actual forward connect are at least two accepts; concurrent forwards add more. BSD
@@ -808,4 +814,139 @@ async fn install_port_forward_prints_pf_anchor_and_sudo_commands() {
             i + 1
         );
     }
+}
+
+/// Issue #61: HMR heartbeat pings ride *inside* the upgraded WebSocket tunnel, so they never
+/// touch `last_request` and an otherwise-quiet dev session looks idle to the scanner. A live
+/// tunnel must keep its app alive past `idle_timeout`; once that tunnel closes, the app idle-
+/// stops the same as any other. Holds a *silent* tunnel open — no frames at all — so the test
+/// turns purely on tunnel liveness, the exact case a byte-counting scheme would miss.
+#[tokio::test]
+async fn idle_scanner_keeps_app_alive_while_websocket_tunnel_is_open() {
+    let mut sandbox = Sandbox::new().await;
+    sandbox.start_daemon().await;
+
+    let app_dir = TempDir::new().expect("app dir");
+    let cmd = write_ws_echo_server(app_dir.path()).await;
+    // Tiny idle window so the test is tractable; the tunnel heartbeat must beat it.
+    write_app_with_idle_timeout(app_dir.path(), "wsidle", &cmd, "2s").await;
+
+    let add = sandbox
+        .cmd()
+        .arg("add")
+        .arg(app_dir.path())
+        .output()
+        .await
+        .expect("add");
+    assert!(add.status.success(), "add: {:?}", add);
+
+    let proxy_port = sandbox.proxy_port;
+    let (connected_tx, connected_rx) = std::sync::mpsc::channel::<()>();
+    let (close_tx, close_rx) = std::sync::mpsc::channel::<()>();
+
+    // Hold the tunnel open on a side thread so the async test can poke `adj status` while the
+    // session is live. The thread completes the handshake, signals `connected`, then blocks —
+    // sending nothing — until the test tells it to close, proving an idle-but-open tunnel keeps
+    // the app alive. On close it sends a close frame and asserts the tunnel tears down (EOF).
+    let client = std::thread::spawn(move || -> Result<(), String> {
+        let mut stream =
+            TcpStream::connect(("127.0.0.1", proxy_port)).map_err(|e| format!("connect: {e}"))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(70)))
+            .map_err(|e| format!("set_read_timeout: {e}"))?;
+        let req = "GET /ws HTTP/1.1\r\n\
+                   Host: wsidle.adj.ac\r\n\
+                   Connection: Upgrade\r\n\
+                   Upgrade: websocket\r\n\
+                   Sec-WebSocket-Version: 13\r\n\
+                   Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+        stream
+            .write_all(req.as_bytes())
+            .map_err(|e| format!("write handshake: {e}"))?;
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            let mut byte = [0u8; 1];
+            stream
+                .read_exact(&mut byte)
+                .map_err(|e| format!("read response head: {e}"))?;
+            head.push(byte[0]);
+        }
+        let head = String::from_utf8_lossy(&head);
+        let status_line = head.lines().next().unwrap_or("");
+        if !status_line.contains(" 101 ") {
+            return Err(format!(
+                "expected 101 Switching Protocols, got: {status_line}"
+            ));
+        }
+        connected_tx
+            .send(())
+            .map_err(|e| format!("signal connected: {e}"))?;
+
+        // Hold the tunnel open, silent, until the test signals close.
+        close_rx
+            .recv()
+            .map_err(|e| format!("await close signal: {e}"))?;
+
+        let close = [0x88u8, 0x80, 0x12, 0x34, 0x56, 0x78];
+        stream
+            .write_all(&close)
+            .map_err(|e| format!("write close frame: {e}"))?;
+        let mut tail = [0u8; 1];
+        let n = stream
+            .read(&mut tail)
+            .map_err(|e| format!("read after close: {e}"))?;
+        if n != 0 {
+            return Err(format!(
+                "expected EOF after close, got byte {:#04x}",
+                tail[0]
+            ));
+        }
+        Ok(())
+    });
+
+    // Wait until the tunnel is established (which means the proxy has lazy-booted the app).
+    tokio::task::spawn_blocking(move || connected_rx.recv())
+        .await
+        .expect("join connected recv")
+        .expect("client should connect and upgrade");
+
+    // Hold the silent tunnel open well past the 2s idle window. Without a tunnel-aware idle
+    // heartbeat the scanner SIGTERMs the app at ~2s; with it the app stays Running.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let status = sandbox
+        .cmd()
+        .arg("status")
+        .arg("wsidle")
+        .output()
+        .await
+        .expect("status");
+    let out = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        out.contains("running"),
+        "open WS tunnel must keep app alive past idle_timeout, got: {out}"
+    );
+
+    // Close the tunnel; the app should now idle-stop on its own.
+    close_tx.send(()).expect("send close signal");
+    tokio::task::spawn_blocking(move || client.join())
+        .await
+        .expect("join client task")
+        .expect("client thread panicked")
+        .expect("client assertions");
+
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let status = sandbox
+        .cmd()
+        .arg("status")
+        .arg("wsidle")
+        .output()
+        .await
+        .expect("status");
+    let out = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        out.contains("stopped"),
+        "app must idle-stop after its only WS tunnel closed, got: {out}"
+    );
+
+    sandbox.stop_daemon().await;
 }

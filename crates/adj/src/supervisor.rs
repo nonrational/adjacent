@@ -462,6 +462,18 @@ impl Supervisor {
         }
     }
 
+    /// The configured idle window for a *running* app, or `None` when idle shutdown is off or the
+    /// app isn't running. The proxy's WebSocket tunnel heartbeat reads this to size its touch
+    /// cadence and to skip the heartbeat entirely for windowless apps (issue #61).
+    pub async fn idle_window(&self, name: &str) -> Option<Duration> {
+        let inner = self.inner.lock().await;
+        inner
+            .apps
+            .get(name)
+            .filter(|rt| matches!(rt.state, AppState::Running { .. }))
+            .and_then(|rt| rt.idle_timeout)
+    }
+
     /// Snapshot every running app's idle status. Returned tuples are `(name, idle_for)` —
     /// callers compare against the app's configured `idle_timeout` to decide whether to stop.
     pub async fn idle_candidates(&self) -> Vec<(String, Duration, Option<Duration>)> {
