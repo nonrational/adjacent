@@ -164,3 +164,41 @@ function parseList(lines, i, glossaryIndex) {
     .join('');
   return { html: `<${tag}>${body}</${tag}>`, next: i };
 }
+
+// Parse a lesson file of the fixed template shape into structured parts.
+export function parseLesson(filename, md) {
+  const fm = filename.match(/^(\d+)-([a-z0-9-]+)\.md$/);
+  if (!fm) throw new Error(`not a lesson filename: ${filename}`);
+  const pr = Number(fm[1]);
+  const slug = fm[2];
+
+  let rest = String(md).replace(/^﻿/, '').replace(/^<!--[\s\S]*?-->\s*/, '');
+
+  const titleMatch = rest.match(/^#\s+(.*)\n?/);
+  const title = titleMatch ? titleMatch[1].trim() : '';
+  if (titleMatch) rest = rest.slice(titleMatch[0].length);
+
+  const lines = rest.split('\n');
+  let i = 0;
+  while (i < lines.length && lines[i].trim() === '') i++;
+  const quote = [];
+  while (i < lines.length && lines[i].startsWith('>')) {
+    quote.push(lines[i].replace(/^>\s?/, ''));
+    i++;
+  }
+  const bodyMarkdown = lines.slice(i).join('\n').trim();
+
+  const field = (label) => (quote.find((l) => l.startsWith(`**${label}:**`)) || '')
+    .replace(new RegExp(`^\\*\\*${label}:\\*\\*\\s*`), '')
+    .trim();
+
+  const lesson = field('Rust lesson');
+  const tags = field('Tags').split('·').map((t) => t.replace(/`/g, '').trim()).filter(Boolean);
+  const mergedRaw = field('Merged');
+  const mm = mergedRaw.match(/^([0-9-]+)\s*·\s*(.+?)\s*·\s*\[[^\]]*\]\(([^)]+)\)/);
+  const merged = mm
+    ? { date: mm[1].trim(), delta: mm[2].trim(), url: mm[3].trim() }
+    : { date: '', delta: '', url: '' };
+
+  return { pr, slug, title, lesson, tags, merged, bodyMarkdown };
+}

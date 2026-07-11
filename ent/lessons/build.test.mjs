@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { escapeHtml, escapeAttr, renderInline, renderMarkdown } from './build.mjs';
+import { escapeHtml, escapeAttr, renderInline, renderMarkdown, parseLesson } from './build.mjs';
 
 test('escapeHtml escapes angle brackets and ampersands', () => {
   assert.equal(escapeHtml('a < b & c > d'), 'a &lt; b &amp; c &gt; d');
@@ -115,4 +115,43 @@ test('renderMarkdown: real wrapped bullets stay one list with no stray paragraph
   assert.equal((html.match(/<ul>/g) || []).length, 1);
   assert.equal((html.match(/<li>/g) || []).length, 2);
   assert.equal((html.match(/<p>/g) || []).length, 0);
+});
+
+const SAMPLE = `<!-- Lesson for PR #16. Teaches one concept. -->
+
+# PR #16 — Tracer: supervised app with logs
+
+> **Rust lesson:** Hand the task an \`Arc<Mutex<T>>\` clone.
+> **Tags:** \`Arc<Mutex<T>>\` · \`tokio::spawn\`
+> **Merged:** 2026-06-08 · +2369/−0 · [View PR](https://github.com/nonrational/adjacent/pull/16)
+
+## The situation
+
+First paragraph.
+`;
+
+test('parseLesson extracts pr, slug, and title', () => {
+  const p = parseLesson('16-supervised-app-with-logs.md', SAMPLE);
+  assert.equal(p.pr, 16);
+  assert.equal(p.slug, 'supervised-app-with-logs');
+  assert.equal(p.title, 'PR #16 — Tracer: supervised app with logs');
+});
+
+test('parseLesson extracts the lesson sentence and tags', () => {
+  const p = parseLesson('16-supervised-app-with-logs.md', SAMPLE);
+  assert.equal(p.lesson, 'Hand the task an `Arc<Mutex<T>>` clone.');
+  assert.deepEqual(p.tags, ['Arc<Mutex<T>>', 'tokio::spawn']);
+});
+
+test('parseLesson extracts merged date, delta, and url', () => {
+  const p = parseLesson('16-supervised-app-with-logs.md', SAMPLE);
+  assert.equal(p.merged.date, '2026-06-08');
+  assert.equal(p.merged.delta, '+2369/−0');
+  assert.equal(p.merged.url, 'https://github.com/nonrational/adjacent/pull/16');
+});
+
+test('parseLesson body starts after the blockquote header', () => {
+  const p = parseLesson('16-supervised-app-with-logs.md', SAMPLE);
+  assert.ok(p.bodyMarkdown.startsWith('## The situation'));
+  assert.ok(!p.bodyMarkdown.includes('Rust lesson:'));
 });
