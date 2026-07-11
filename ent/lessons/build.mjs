@@ -400,7 +400,8 @@ const DRAWER_JS = String.raw`(() => {
     '<div class="d-body"></div>';
   document.body.append(scrim, drawer);
   const body = drawer.querySelector('.d-body');
-  const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  // Escapes text and attribute values alike (includes ") so a quote in a glossary key or URL can't break out of an attribute.
+  const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   let history = [];
 
   function render(key) {
