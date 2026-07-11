@@ -382,3 +382,82 @@ span.tag { border-bottom: 1px dotted var(--rule); }
 export function renderGlossaryScript(glossary) {
   return `${ASSET_HEADER}\nwindow.__GLOSSARY__ = ${JSON.stringify(glossary, null, 0)};\n`;
 }
+
+// Browser-side drawer. Built as a string so the generator can emit it verbatim.
+// Progressive enhancement: with JS off, .term buttons are inert and the lesson
+// stays fully readable.
+const DRAWER_JS = String.raw`(() => {
+  const G = window.__GLOSSARY__ || {};
+  const scrim = document.createElement('div');
+  scrim.className = 'drawer-scrim';
+  const drawer = document.createElement('aside');
+  drawer.className = 'drawer';
+  drawer.setAttribute('role', 'dialog');
+  drawer.setAttribute('aria-label', 'Term explanation');
+  drawer.innerHTML =
+    '<button class="close" aria-label="Close">×</button>' +
+    '<button class="back-link">← back</button>' +
+    '<div class="d-body"></div>';
+  document.body.append(scrim, drawer);
+  const body = drawer.querySelector('.d-body');
+  const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  let history = [];
+
+  function render(key) {
+    const e = G[key];
+    if (!e) return;
+    const prereqs = (e.prereqs || [])
+      .filter((k) => G[k])
+      .map((k) => '<button type="button" class="term" data-term="' + esc(k) + '"><code>' + esc(G[k].term) + '</code></button>')
+      .join('');
+    const link = e.link ? '<p class="d-label">Dig deeper</p><p class="d-link"><a href="' + esc(e.link.url) + '" target="_blank" rel="noopener">' + esc(e.link.label) + '</a></p>' : '';
+    body.innerHTML =
+      '<p class="d-term">' + esc(e.term) + '</p>' +
+      '<p class="d-short">' + esc(e.short || '') + '</p>' +
+      (e.why ? '<p class="d-label">Why it matters</p><p class="d-why">' + esc(e.why) + '</p>' : '') +
+      (prereqs ? '<p class="d-label">Learn first</p><div class="d-prereqs">' + prereqs + '</div>' : '') +
+      link;
+    // Back is shown only once we've descended past the root term.
+    drawer.classList.toggle('has-history', history.length > 1);
+  }
+
+  function open(key) {
+    history = [key];
+    render(key);
+    scrim.classList.add('open');
+    drawer.classList.add('open');
+  }
+  function close() {
+    scrim.classList.remove('open');
+    drawer.classList.remove('open');
+    history = [];
+    drawer.classList.remove('has-history');
+  }
+
+  document.addEventListener('click', (ev) => {
+    const term = ev.target.closest('.term');
+    if (term && term.dataset.term) {
+      ev.preventDefault();
+      if (ev.target.closest('.drawer')) {
+        history.push(term.dataset.term); // descend into a prereq
+        render(term.dataset.term);
+      } else {
+        open(term.dataset.term);         // open from the lesson prose
+      }
+      return;
+    }
+    if (ev.target.closest('.drawer .close')) { close(); }
+  });
+  drawer.querySelector('.back-link').addEventListener('click', () => {
+    history.pop();
+    const prev = history[history.length - 1];
+    if (prev) { render(prev); } else { close(); }
+  });
+  scrim.addEventListener('click', close);
+  document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') close(); });
+})();
+`;
+
+export function renderDrawerScript() {
+  return `${ASSET_HEADER}\n${DRAWER_JS}`;
+}
