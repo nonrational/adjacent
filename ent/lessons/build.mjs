@@ -202,3 +202,50 @@ export function parseLesson(filename, md) {
 
   return { pr, slug, title, lesson, tags, merged, bodyMarkdown };
 }
+
+// Every prereq must resolve to a real entry; every alias/term must be unique
+// across entries (an ambiguous alias could not annotate deterministically).
+export function validateGlossary(glossary) {
+  const errors = [];
+  const warnings = [];
+  const keys = new Set(Object.keys(glossary));
+  const seen = new Map();
+  for (const [key, e] of Object.entries(glossary)) {
+    for (const p of e.prereqs || []) {
+      if (!keys.has(p)) errors.push(`entry '${key}': prereq '${p}' has no glossary entry`);
+    }
+    for (const name of [e.term, ...(e.aliases || [])]) {
+      if (!name) continue;
+      if (seen.has(name) && seen.get(name) !== key) {
+        errors.push(`alias '${name}' maps to both '${seen.get(name)}' and '${key}'`);
+      } else {
+        seen.set(name, key);
+      }
+    }
+  }
+  return { errors, warnings };
+}
+
+export function buildGlossaryIndex(glossary) {
+  const idx = new Map();
+  for (const [key, e] of Object.entries(glossary)) {
+    for (const name of [e.term, ...(e.aliases || [])]) {
+      if (name) idx.set(name, key);
+    }
+  }
+  return idx;
+}
+
+export function coverageReport(lessons, glossaryIndex) {
+  const counts = new Map();
+  for (const l of lessons) {
+    const noFences = String(l.bodyMarkdown).replace(/```[\s\S]*?```/g, '');
+    for (const m of noFences.matchAll(/`([^`]+)`/g)) {
+      const t = m[1];
+      if (!glossaryIndex.has(t)) counts.set(t, (counts.get(t) || 0) + 1);
+    }
+  }
+  return [...counts.entries()]
+    .map(([term, count]) => ({ term, count }))
+    .sort((a, b) => b.count - a.count || a.term.localeCompare(b.term));
+}

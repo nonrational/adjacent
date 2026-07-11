@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { escapeHtml, escapeAttr, renderInline, renderMarkdown, parseLesson } from './build.mjs';
+import { escapeHtml, escapeAttr, renderInline, renderMarkdown, parseLesson, validateGlossary, buildGlossaryIndex, coverageReport } from './build.mjs';
 
 test('escapeHtml escapes angle brackets and ampersands', () => {
   assert.equal(escapeHtml('a < b & c > d'), 'a &lt; b &amp; c &gt; d');
@@ -154,4 +154,50 @@ test('parseLesson body starts after the blockquote header', () => {
   const p = parseLesson('16-supervised-app-with-logs.md', SAMPLE);
   assert.ok(p.bodyMarkdown.startsWith('## The situation'));
   assert.ok(!p.bodyMarkdown.includes('Rust lesson:'));
+});
+
+const GLOSSARY = {
+  arc: { term: 'Arc<T>', aliases: ['Arc', 'Arc<Mutex<T>>'], short: 's', why: 'w', prereqs: ['ownership'], link: { label: 'x', url: 'y' } },
+  ownership: { term: 'ownership', aliases: [], short: 's', why: 'w', prereqs: [], link: { label: 'x', url: 'y' } },
+};
+
+test('validateGlossary: clean glossary has no errors', () => {
+  assert.deepEqual(validateGlossary(GLOSSARY).errors, []);
+});
+
+test('validateGlossary: dangling prereq is an error', () => {
+  const bad = { arc: { term: 'Arc<T>', aliases: [], prereqs: ['nope'] } };
+  assert.equal(validateGlossary(bad).errors.length, 1);
+  assert.match(validateGlossary(bad).errors[0], /nope/);
+});
+
+test('validateGlossary: duplicate alias across entries is an error', () => {
+  const bad = {
+    a: { term: 'A', aliases: ['shared'], prereqs: [] },
+    b: { term: 'B', aliases: ['shared'], prereqs: [] },
+  };
+  assert.match(validateGlossary(bad).errors[0], /shared/);
+});
+
+test('buildGlossaryIndex maps every term and alias to its key', () => {
+  const idx = buildGlossaryIndex(GLOSSARY);
+  assert.equal(idx.get('Arc'), 'arc');
+  assert.equal(idx.get('Arc<Mutex<T>>'), 'arc');
+  assert.equal(idx.get('Arc<T>'), 'arc');
+  assert.equal(idx.get('ownership'), 'ownership');
+});
+
+test('renderInline wraps a glossary-matched code span as a term button', () => {
+  const idx = buildGlossaryIndex(GLOSSARY);
+  assert.equal(
+    renderInline('use `Arc` now', { glossaryIndex: idx }),
+    'use <button type="button" class="term" data-term="arc"><code>Arc</code></button> now',
+  );
+});
+
+test('coverageReport lists backticked terms missing from the glossary, not those present', () => {
+  const idx = buildGlossaryIndex(GLOSSARY);
+  const lessons = [{ bodyMarkdown: 'see `Arc` and `Weak`\n```rust\n`Mutex` in code\n```' }];
+  const rep = coverageReport(lessons, idx);
+  assert.deepEqual(rep, [{ term: 'Weak', count: 1 }]);
 });
