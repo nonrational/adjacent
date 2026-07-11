@@ -360,6 +360,13 @@ pre code { color: var(--paper); font-size: 13px; line-height: 1.5; }
 .term:hover, .term:focus-visible { background: rgba(212,165,116,0.1); }
 .tag code { font-size: 0.85em; }
 span.tag { border-bottom: 1px dotted var(--rule); }
+table.index { width: 100%; border-collapse: collapse; margin-bottom: 2.5rem; font-size: 0.9rem; }
+table.index td { border-bottom: 1px solid var(--rule); padding: 0.6rem 0.75rem 0.6rem 0; vertical-align: top; }
+table.index td.pr { white-space: nowrap; }
+table.index td.pr a { color: var(--accent); border: none; }
+table.index td.takeaway { color: var(--soft); }
+table.index tr.sparse td { color: var(--dim); }
+table.index .mark { color: var(--accent-dim); }
 /* Drawer (built by drawer.js) */
 .drawer-scrim { position: fixed; inset: 0; background: rgba(0,0,0,0.4); opacity: 0; transition: opacity 0.15s; z-index: 10; }
 .drawer-scrim.open { opacity: 1; }
@@ -461,4 +468,65 @@ const DRAWER_JS = String.raw`(() => {
 
 export function renderDrawerScript() {
   return `${ASSET_HEADER}\n${DRAWER_JS}`;
+}
+
+export function parseReadmeIndex(readmeMd) {
+  const rows = [];
+  const rowRe = /^\|\s*\[#(\d+)\]\(([^)]+)\)\s*(◦)?\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|$/gm;
+  for (const m of readmeMd.matchAll(rowRe)) {
+    rows.push({
+      pr: Number(m[1]),
+      href: m[2].replace(/\.md$/, '.html'),
+      sparse: Boolean(m[3]),
+      lesson: m[4],
+      takeaway: m[5],
+    });
+  }
+  const paths = [];
+  const pathRe = /^-\s+\*\*(.+?)\*\*\s+—\s+(.+)$/gm;
+  for (const m of readmeMd.matchAll(pathRe)) {
+    paths.push({ theme: m[1], html: renderInline(m[2]) });
+  }
+  return { rows, paths };
+}
+
+export function renderIndexPage(readmeMd, { theme = THEME } = {}) {
+  const { rows, paths } = parseReadmeIndex(readmeMd);
+  const { a, slash, b } = theme.wordmark;
+  const rowHtml = rows
+    .map((r) => `<tr${r.sparse ? ' class="sparse"' : ''}><td class="pr"><a href="${escapeAttr(r.href)}">#${r.pr}</a>${r.sparse ? ' <span class="mark">◦</span>' : ''}</td><td>${renderInline(r.lesson)}</td><td class="takeaway">${renderInline(r.takeaway)}</td></tr>`)
+    .join('\n      ');
+  const pathHtml = paths
+    .map((p) => `<li><strong>${escapeHtml(p.theme)}</strong> — ${p.html}</li>`)
+    .join('\n      ');
+  return `${HTML_HEADER}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${escapeHtml(theme.siteTitle)}</title>
+  ${theme.fontLinks}
+  <link rel="stylesheet" href="lessons.css">
+</head>
+<body>
+  <div class="frame">
+    <header>
+      <a class="wordmark" href="${escapeAttr(theme.repoUrl)}"><span class="a">${a}</span><span class="slash">${slash}</span><span class="b">${b}</span></a>
+      <span class="back">Rust, one PR at a time</span>
+    </header>
+    <article>
+      <h1>Rust, one PR at a time</h1>
+      <table class="index">
+      ${rowHtml}
+      </table>
+      <h2>Reading paths by theme</h2>
+      <ul>
+      ${pathHtml}
+      </ul>
+    </article>
+  </div>
+</body>
+</html>
+`;
 }
