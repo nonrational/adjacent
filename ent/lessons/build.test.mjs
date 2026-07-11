@@ -298,3 +298,15 @@ test('renderIndexPage produces a document linking to lesson pages', () => {
   assert.match(html, /href="16-supervised-app-with-logs\.html"/);
   assert.match(html, /<link rel="stylesheet" href="lessons\.css">/);
 });
+
+test('parseReadmeIndex unescapes table-cell pipe escapes in takeaways', () => {
+  const md = [
+    '## The lessons',
+    '',
+    '| PR | Lesson | Takeaway |',
+    '|--|--|--|',
+    '| [#48](48-warn-dont-swallow-errors.md) | Errors | use `.unwrap_or_else(\|err\|)` first |',
+  ].join('\n');
+  const { rows } = parseReadmeIndex(md);
+  assert.equal(rows[0].takeaway, 'use `.unwrap_or_else(|err|)` first');
+});

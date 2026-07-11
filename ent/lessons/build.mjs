@@ -472,14 +472,16 @@ export function renderDrawerScript() {
 
 export function parseReadmeIndex(readmeMd) {
   const rows = [];
+  // Markdown table cells escape a literal pipe as backslash-pipe; restore it for display.
+  const unpipe = (s) => s.replace(/\\\|/g, '|');
   const rowRe = /^\|\s*\[#(\d+)\]\(([^)]+)\)\s*(◦)?\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|$/gm;
   for (const m of readmeMd.matchAll(rowRe)) {
     rows.push({
       pr: Number(m[1]),
       href: m[2].replace(/\.md$/, '.html'),
       sparse: Boolean(m[3]),
-      lesson: m[4],
-      takeaway: m[5],
+      lesson: unpipe(m[4]),
+      takeaway: unpipe(m[5]),
     });
   }
   const paths = [];
