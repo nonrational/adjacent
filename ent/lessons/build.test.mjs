@@ -310,3 +310,31 @@ test('parseReadmeIndex unescapes table-cell pipe escapes in takeaways', () => {
   const { rows } = parseReadmeIndex(md);
   assert.equal(rows[0].takeaway, 'use `.unwrap_or_else(|err|)` first');
 });
+
+import { buildSite, checkCrossLinks } from './build.mjs';
+
+const GL = {
+  arc: { term: 'Arc<T>', aliases: ['Arc'], short: 's', why: 'w', prereqs: [], link: { label: 'x', url: 'y' } },
+};
+const LESSONS = [{
+  pr: 16, slug: 'supervised-app-with-logs', title: 'PR #16 — X',
+  lesson: 'Clone an `Arc`.', tags: ['Arc'],
+  merged: { date: '2026-06-08', delta: '+1/−0', url: 'https://example.com/16' },
+  bodyMarkdown: 'Boot with an `Arc`. See [PR #17](17-inject-port-into-child-env.md).',
+}];
+
+test('buildSite returns pages plus the four shared assets', () => {
+  const files = buildSite({ lessons: LESSONS, glossary: GL, readmeMd: '## The lessons\n' });
+  assert.ok(files.has('16-supervised-app-with-logs.html'));
+  assert.ok(files.has('index.html'));
+  assert.ok(files.has('lessons.css'));
+  assert.ok(files.has('drawer.js'));
+  assert.ok(files.has('glossary.js'));
+  assert.match(files.get('16-supervised-app-with-logs.html'), /data-term="arc"/);
+});
+
+test('checkCrossLinks flags a link with no target lesson', () => {
+  const errs = checkCrossLinks(LESSONS); // #17 not in the list
+  assert.equal(errs.length, 1);
+  assert.match(errs[0], /17-inject-port-into-child-env/);
+});

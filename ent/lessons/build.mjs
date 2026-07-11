@@ -532,3 +532,75 @@ export function renderIndexPage(readmeMd, { theme = THEME } = {}) {
 </html>
 `;
 }
+
+import { readFileSync, writeFileSync, readdirSync, mkdirSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+export function checkCrossLinks(lessons) {
+  const known = new Set(lessons.map((l) => `${l.pr}-${l.slug}.md`));
+  const errors = [];
+  const linkRe = /\]\((\d+-[a-z0-9-]+\.md)\)/g;
+  for (const l of lessons) {
+    for (const m of l.bodyMarkdown.matchAll(linkRe)) {
+      if (!known.has(m[1])) errors.push(`${l.pr}-${l.slug}.md links to missing lesson '${m[1]}'`);
+    }
+  }
+  return errors;
+}
+
+export function buildSite({ lessons, glossary, readmeMd, theme = THEME }) {
+  const glossaryIndex = buildGlossaryIndex(glossary);
+  const files = new Map();
+  for (const lesson of lessons) {
+    files.set(`${lesson.pr}-${lesson.slug}.html`, renderLessonPage(lesson, { glossaryIndex, theme }));
+  }
+  files.set('index.html', renderIndexPage(readmeMd, { theme }));
+  files.set('lessons.css', renderStylesheet(theme));
+  files.set('drawer.js', renderDrawerScript());
+  files.set('glossary.js', renderGlossaryScript(glossary));
+  return files;
+}
+
+export async function main(argv) {
+  const check = argv.includes('--check');
+  const root = process.cwd();
+  const { lessonsDir, readme, outDir } = THEME.paths;
+
+  const glossary = JSON.parse(readFileSync(join(root, lessonsDir, 'glossary.json'), 'utf8'));
+  const { errors } = validateGlossary(glossary);
+
+  const files = readdirSync(join(root, lessonsDir)).filter((f) => /^\d+-[a-z0-9-]+\.md$/.test(f));
+  const lessons = files
+    .map((f) => parseLesson(f, readFileSync(join(root, lessonsDir, f), 'utf8')))
+    .sort((a, b) => a.pr - b.pr);
+  const linkErrors = checkCrossLinks(lessons);
+
+  const allErrors = [...errors, ...linkErrors];
+  if (allErrors.length) {
+    console.error('build failed:\n' + allErrors.map((e) => '  - ' + e).join('\n'));
+    process.exitCode = 1;
+    return;
+  }
+
+  const missing = coverageReport(lessons, buildGlossaryIndex(glossary));
+  if (missing.length) {
+    console.log(`coverage: ${missing.length} backticked terms not in glossary (top 10):`);
+    console.log(missing.slice(0, 10).map((m) => `  ${m.count}x  ${m.term}`).join('\n'));
+  }
+
+  if (check) {
+    console.log(`check OK — ${lessons.length} lessons, ${Object.keys(glossary).length} glossary entries`);
+    return;
+  }
+
+  const readmeMd = readFileSync(join(root, readme), 'utf8');
+  const out = buildSite({ lessons, glossary, readmeMd });
+  mkdirSync(join(root, outDir), { recursive: true });
+  for (const [name, content] of out) writeFileSync(join(root, outDir, name), content);
+  console.log(`wrote ${out.size} files to ${outDir}`);
+}
+
+if (import.meta.main) {
+  main(process.argv.slice(2));
+}
