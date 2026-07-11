@@ -74,3 +74,45 @@ test('renderMarkdown: unordered list with one nested level', () => {
 test('renderMarkdown: ordered list', () => {
   assert.equal(renderMarkdown('1. first\n2. second'), '<ol><li>first</li><li>second</li></ol>');
 });
+
+test('renderMarkdown: a bullet wrapping across lines stays one <li>', () => {
+  assert.equal(
+    renderMarkdown('- first line\n  wrapped second'),
+    '<ul><li>first line wrapped second</li></ul>',
+  );
+});
+
+test('renderMarkdown: an ordered item wrapping across lines stays one <li>', () => {
+  assert.equal(
+    renderMarkdown('1. first line\n   wraps here\n2. second'),
+    '<ol><li>first line wraps here</li><li>second</li></ol>',
+  );
+});
+
+test('renderMarkdown: two nested siblings share one nested list', () => {
+  assert.equal(
+    renderMarkdown('- top\n  - n1\n  - n2'),
+    '<ul><li>top<ul><li>n1</li><li>n2</li></ul></li></ul>',
+  );
+});
+
+test('renderMarkdown: a marker-type change splits into two lists', () => {
+  assert.equal(
+    renderMarkdown('- a\n1. b'),
+    '<ul><li>a</li></ul><ol><li>b</li></ol>',
+  );
+});
+
+test('renderMarkdown: real wrapped bullets stay one list with no stray paragraphs', () => {
+  const md = [
+    '- **Root-relative, trailing slash.** The leading `/` resolves from the domain',
+    '  root regardless of where the visitor entered. The trailing slash points at the',
+    '  *directory* `/ent/`, whose index (`ent/index.html`) the host serves.',
+    '- **`rel="canonical"`.** Meta-refresh shells look like duplicate content or a',
+    '  sneaky redirect to a crawler.',
+  ].join('\n');
+  const html = renderMarkdown(md);
+  assert.equal((html.match(/<ul>/g) || []).length, 1);
+  assert.equal((html.match(/<li>/g) || []).length, 2);
+  assert.equal((html.match(/<p>/g) || []).length, 0);
+});

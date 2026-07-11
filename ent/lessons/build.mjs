@@ -58,15 +58,13 @@ export function renderInline(text, { glossaryIndex } = {}) {
 }
 
 // Block-level renderer for the bounded markdown the lessons use: ATX headings,
-// paragraphs, fenced code (literal), and unordered/ordered lists with one nesting
-// level. Blockquotes are handled by parseLesson (the header) and do not appear in
-// bodies, so they are intentionally unsupported here.
+// paragraphs, fenced code (literal), and unordered/ordered lists with one
+// nesting level. Blockquotes are handled by parseLesson (the header) and do
+// not appear in bodies, so they are intentionally unsupported here.
 export function renderMarkdown(body, { glossaryIndex } = {}) {
   const lines = String(body).replace(/\r\n/g, '\n').split('\n');
   const out = [];
   let i = 0;
-
-  const listItemHtml = (text) => renderInline(text, { glossaryIndex });
 
   while (i < lines.length) {
     const line = lines[i];
@@ -91,22 +89,9 @@ export function renderMarkdown(body, { glossaryIndex } = {}) {
     }
 
     if (/^\s*([-*]|\d+\.)\s+/.test(line)) {
-      const ordered = /^\s*\d+\.\s+/.test(line);
-      const tag = ordered ? 'ol' : 'ul';
-      const items = [];
-      while (i < lines.length && /^\s*([-*]|\d+\.)\s+/.test(lines[i])) {
-        const m = lines[i].match(/^(\s*)([-*]|\d+\.)\s+(.*)$/);
-        const indented = m[1].length >= 2;
-        const text = listItemHtml(m[3]);
-        if (indented && items.length) {
-          const last = items.length - 1;
-          items[last] = items[last].replace(/<\/li>$/, '') + `<ul><li>${text}</li></ul></li>`;
-        } else {
-          items.push(`<li>${text}</li>`);
-        }
-        i++;
-      }
-      out.push(`<${tag}>${items.join('')}</${tag}>`);
+      const { html, next } = parseList(lines, i, glossaryIndex);
+      out.push(html);
+      i = next;
       continue;
     }
 
@@ -116,7 +101,11 @@ export function renderMarkdown(body, { glossaryIndex } = {}) {
     }
 
     const para = [];
-    while (i < lines.length && lines[i].trim() !== '' && !/^(#{1,3}\s|```|\s*([-*]|\d+\.)\s)/.test(lines[i])) {
+    while (
+      i < lines.length &&
+      lines[i].trim() !== '' &&
+      !/^(#{1,3}\s|```|\s*([-*]|\d+\.)\s)/.test(lines[i])
+    ) {
       para.push(lines[i]);
       i++;
     }
@@ -124,4 +113,54 @@ export function renderMarkdown(body, { glossaryIndex } = {}) {
   }
 
   return out.join('');
+}
+
+// Parse one list (plus one level of nested sub-lists) starting at line `i`.
+// Item text accumulates lazy-continuation lines (wrapped prose) the way the
+// paragraph branch does, so a bullet spanning several source lines stays a
+// single <li>. A marker indented deeper than this list's base opens a nested
+// list under the current item; a shallower marker, a blank line, a block
+// start, or a marker-type change ends the list. Returns the HTML and the
+// index just past the list.
+function parseList(lines, i, glossaryIndex) {
+  const first = lines[i].match(/^(\s*)([-*]|\d+\.)\s+/);
+  const baseIndent = first[1].length;
+  const ordered = /\d+\./.test(first[2]);
+  const tag = ordered ? 'ol' : 'ul';
+  const items = [];
+
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line.trim() === '') break;              // blank line ends the list
+    if (/^(#{1,3}\s|```)/.test(line)) break;    // a block start ends the list
+    const m = line.match(/^(\s*)([-*]|\d+\.)\s+(.*)$/);
+    if (m) {
+      const indent = m[1].length;
+      if (indent > baseIndent) {                // deeper: nested list under last item
+        const sub = parseList(lines, i, glossaryIndex);
+        if (items.length) items[items.length - 1].children += sub.html;
+        i = sub.next;
+        continue;
+      }
+      if (indent < baseIndent) break;           // dedent: this list is done
+      if (/\d+\./.test(m[2]) !== ordered) break; // marker type change ends the list
+      items.push({ text: m[3], children: '' });
+      i++;
+      continue;
+    }
+    if (items.length) {                          // lazy continuation of current item
+      items[items.length - 1].text += ` ${line.trim()}`;
+      i++;
+      continue;
+    }
+    break;
+  }
+
+  const body = items
+    .map(
+      (it) =>
+        `<li>${renderInline(it.text.replace(/\s+/g, ' ').trim(), { glossaryIndex })}${it.children}</li>`,
+    )
+    .join('');
+  return { html: `<${tag}>${body}</${tag}>`, next: i };
 }
