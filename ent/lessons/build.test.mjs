@@ -35,3 +35,10 @@ test('renderInline: cross-lesson .md link is rewritten to .html', () => {
     '<a href="40-serve-https-local-ca.html">PR #40</a>',
   );
 });
+
+test('renderInline: a link label containing inline code renders the code span', () => {
+  assert.equal(
+    renderInline('run [`adj install-ca`](40-serve-https-local-ca.md) first'),
+    'run <a href="40-serve-https-local-ca.html"><code>adj install-ca</code></a> first',
+  );
+});
