@@ -56,3 +56,72 @@ export function renderInline(text, { glossaryIndex } = {}) {
   }
   return s;
 }
+
+// Block-level renderer for the bounded markdown the lessons use: ATX headings,
+// paragraphs, fenced code (literal), and unordered/ordered lists with one nesting
+// level. Blockquotes are handled by parseLesson (the header) and do not appear in
+// bodies, so they are intentionally unsupported here.
+export function renderMarkdown(body, { glossaryIndex } = {}) {
+  const lines = String(body).replace(/\r\n/g, '\n').split('\n');
+  const out = [];
+  let i = 0;
+
+  const listItemHtml = (text) => renderInline(text, { glossaryIndex });
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    if (/^```/.test(line)) {
+      const lang = line.slice(3).trim();
+      const buf = [];
+      i++;
+      while (i < lines.length && !/^```/.test(lines[i])) buf.push(lines[i++]);
+      i++; // consume closing fence
+      const cls = lang ? ` class="language-${escapeAttr(lang)}"` : '';
+      out.push(`<pre><code${cls}>${escapeHtml(buf.join('\n') + '\n')}</code></pre>`);
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,3})\s+(.*)$/);
+    if (heading) {
+      const level = heading[1].length;
+      out.push(`<h${level}>${renderInline(heading[2].trim(), { glossaryIndex })}</h${level}>`);
+      i++;
+      continue;
+    }
+
+    if (/^\s*([-*]|\d+\.)\s+/.test(line)) {
+      const ordered = /^\s*\d+\.\s+/.test(line);
+      const tag = ordered ? 'ol' : 'ul';
+      const items = [];
+      while (i < lines.length && /^\s*([-*]|\d+\.)\s+/.test(lines[i])) {
+        const m = lines[i].match(/^(\s*)([-*]|\d+\.)\s+(.*)$/);
+        const indented = m[1].length >= 2;
+        const text = listItemHtml(m[3]);
+        if (indented && items.length) {
+          const last = items.length - 1;
+          items[last] = items[last].replace(/<\/li>$/, '') + `<ul><li>${text}</li></ul></li>`;
+        } else {
+          items.push(`<li>${text}</li>`);
+        }
+        i++;
+      }
+      out.push(`<${tag}>${items.join('')}</${tag}>`);
+      continue;
+    }
+
+    if (line.trim() === '') {
+      i++;
+      continue;
+    }
+
+    const para = [];
+    while (i < lines.length && lines[i].trim() !== '' && !/^(#{1,3}\s|```|\s*([-*]|\d+\.)\s)/.test(lines[i])) {
+      para.push(lines[i]);
+      i++;
+    }
+    out.push(`<p>${renderInline(para.join(' ').replace(/\s+/g, ' ').trim(), { glossaryIndex })}</p>`);
+  }
+
+  return out.join('');
+}
