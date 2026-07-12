@@ -368,8 +368,8 @@ table.index td.takeaway { color: var(--soft); }
 table.index tr.sparse td { color: var(--dim); }
 table.index .mark { color: var(--accent-dim); }
 /* Drawer (built by drawer.js) */
-.drawer-scrim { position: fixed; inset: 0; background: rgba(0,0,0,0.4); opacity: 0; transition: opacity 0.15s; z-index: 10; }
-.drawer-scrim.open { opacity: 1; }
+.drawer-scrim { position: fixed; inset: 0; background: rgba(0,0,0,0.4); opacity: 0; pointer-events: none; transition: opacity 0.15s; z-index: 10; }
+.drawer-scrim.open { opacity: 1; pointer-events: auto; }
 .drawer { position: fixed; top: 0; right: 0; height: 100%; width: min(360px, 90vw); background: var(--ink); border-left: 1px solid var(--rule); transform: translateX(100%); transition: transform 0.18s ease-out; z-index: 11; padding: 1.75rem 1.5rem; overflow-y: auto; }
 .drawer.open { transform: none; }
 .drawer .close { position: absolute; top: 1rem; right: 1.1rem; background: none; border: none; color: var(--dim); font: inherit; font-size: 1.2rem; cursor: pointer; }

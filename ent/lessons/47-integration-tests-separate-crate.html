@@ -37,7 +37,7 @@ fn cmd(&amp;self) -&gt; Command {
     c.env_remove("BIND_PORT");
     c
 }
-</code></pre><p>The test itself is <code>async</code>, so it's annotated <code>#[tokio::test]</code> — the async cousin of <code>#[test]</code>, which spins up a Tokio runtime around the test body so you can <code>.await</code> inside it (here: awaiting daemon startup, subprocess output, and the container teardown poll):</p><pre><code class="language-rust">// crates/adj/tests/docker.rs
+</code></pre><p>The test itself is <button type="button" class="term" data-term="async-await"><code>async</code></button>, so it's annotated <code>#[tokio::test]</code> — the async cousin of <code>#[test]</code>, which spins up a Tokio runtime around the test body so you can <button type="button" class="term" data-term="async-await"><code>.await</code></button> inside it (here: awaiting daemon startup, subprocess output, and the container teardown poll):</p><pre><code class="language-rust">// crates/adj/tests/docker.rs
 #[tokio::test]
 async fn docker_run_lazy_boots_and_down_stops_the_container() {
     if !docker_ready().await {
