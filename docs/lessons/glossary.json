@@ -1,0 +1,362 @@
+{
+  "ownership": {
+    "term": "ownership",
+    "aliases": [],
+    "short": "Every value has exactly one owner. When the owner goes out of scope the value is dropped and its memory freed. No garbage collector, no manual free().",
+    "why": "The single-owner rule is the root of Rust's memory safety, and the reason sharing, borrowing, and moving all have to be made explicit rather than assumed.",
+    "prereqs": [],
+    "link": { "label": "Rust Book 4.1", "url": "https://doc.rust-lang.org/book/ch04-01-what-is-ownership.html" }
+  },
+  "borrowing": {
+    "term": "borrowing",
+    "aliases": ["reference"],
+    "short": "Accessing a value through a reference (&T) without taking ownership. You can have many shared &T reads, or exactly one exclusive &mut T, but never both at once.",
+    "why": "Borrowing lets code use a value without moving it, and the one-writer-or-many-readers rule is what stops data races at compile time instead of in production.",
+    "prereqs": ["ownership"],
+    "link": { "label": "Rust Book 4.2", "url": "https://doc.rust-lang.org/book/ch04-02-references-and-borrowing.html" }
+  },
+  "move": {
+    "term": "move",
+    "aliases": ["move semantics"],
+    "short": "Assigning or passing a non-Copy value transfers ownership; the source can no longer be used. `move` on a closure forces it to take ownership of what it captures.",
+    "why": "A spawned task must own what it touches. `move` is how you hand ownership into a closure so it can outlive the function that created it.",
+    "prereqs": ["ownership"],
+    "link": { "label": "Rust Book 4.1", "url": "https://doc.rust-lang.org/book/ch04-01-what-is-ownership.html#variables-and-data-interacting-with-move" }
+  },
+  "lifetime": {
+    "term": "lifetime",
+    "aliases": [],
+    "short": "The span of code for which a reference stays valid. The compiler checks that no reference outlives the value it points at, sometimes with named annotations like 'a.",
+    "why": "Lifetimes are how Rust guarantees a reference can never dangle. Most are inferred; you only write them when the compiler can't tell which input a returned reference came from.",
+    "prereqs": ["borrowing"],
+    "link": { "label": "Rust Book 10.3", "url": "https://doc.rust-lang.org/book/ch10-03-lifetime-syntax.html" }
+  },
+  "static-lifetime": {
+    "term": "'static",
+    "aliases": ["'static"],
+    "short": "A lifetime meaning \"lives for the entire program.\" A value is 'static if it owns all its data (borrows nothing) or points at data baked into the binary.",
+    "why": "A task handed to a background executor must be 'static: it may outlive the function that spawned it, so it can't borrow anything on that function's stack.",
+    "prereqs": ["lifetime"],
+    "link": { "label": "Rust Book 10.3", "url": "https://doc.rust-lang.org/book/ch10-03-lifetime-syntax.html#the-static-lifetime" }
+  },
+  "send-sync": {
+    "term": "Send / Sync",
+    "aliases": ["Send", "Sync", "Send + Sync"],
+    "short": "Marker traits the compiler infers automatically: Send means a value can be moved to another thread; Sync means it can be shared by reference across threads.",
+    "why": "They are what let the compiler reject cross-thread data races before the program runs. Arc is Send + Sync; Rc is neither, which is why spawn rejects it.",
+    "prereqs": ["ownership"],
+    "link": { "label": "Rust Book 16.4", "url": "https://doc.rust-lang.org/book/ch16-04-extensible-concurrency-sync-and-send.html" }
+  },
+  "interior-mutability": {
+    "term": "interior mutability",
+    "aliases": ["interior mutability", "RefCell"],
+    "short": "A pattern where you mutate data through a shared (&T) reference, with a wrapper type (Cell, RefCell, Mutex) enforcing the borrow rules at runtime instead of compile time.",
+    "why": "Sometimes you genuinely need to mutate shared state; interior mutability moves the one-writer check to runtime so the compiler will allow it, and a Mutex is its thread-safe form.",
+    "prereqs": ["ownership", "borrowing"],
+    "link": { "label": "Rust Book 15.5", "url": "https://doc.rust-lang.org/book/ch15-05-interior-mutability.html" }
+  },
+  "reference-counting": {
+    "term": "reference counting",
+    "aliases": [],
+    "short": "Sharing ownership of one value among several owners by keeping a count of how many exist; the value is dropped when the last owner goes away. Rc for one thread, Arc across threads.",
+    "why": "It's the escape hatch for when a single owner isn't enough. The count is the trade you make: cheap clones that share, at the cost of a runtime counter and no compile-time single-owner guarantee.",
+    "prereqs": ["ownership"],
+    "link": { "label": "Rust Book 15.4", "url": "https://doc.rust-lang.org/book/ch15-04-rc.html" }
+  },
+  "rc": {
+    "term": "Rc<T>",
+    "aliases": ["Rc"],
+    "short": "A single-threaded reference-counted pointer. Cloning it bumps a non-atomic count and hands back another owner of the same value.",
+    "why": "Cheaper than Arc because the count isn't atomic, but that's exactly why it isn't Send: hand it to another thread and the compiler stops you. Reach for Arc when threads are involved.",
+    "prereqs": ["reference-counting", "send-sync"],
+    "link": { "label": "Rust Book 15.4", "url": "https://doc.rust-lang.org/book/ch15-04-rc.html" }
+  },
+  "arc": {
+    "term": "Arc<T>",
+    "aliases": ["Arc", "Arc<Mutex<T>>", "Arc<Mutex<Inner>>", "Arc<T>"],
+    "short": "Atomically reference-counted shared pointer. Cloning it bumps a thread-safe refcount and hands back a second owner of the same value, not a copy.",
+    "why": "Lets two threads or tasks own one value at once. It is how a detached task can touch state the spawner still holds. Wrap it around a Mutex when the shared value also needs mutation.",
+    "prereqs": ["reference-counting", "move", "send-sync"],
+    "link": { "label": "Rust Book 16.3", "url": "https://doc.rust-lang.org/book/ch16-03-shared-state.html" }
+  },
+  "weak": {
+    "term": "Weak<T>",
+    "aliases": ["Weak"],
+    "short": "A non-owning reference to an Arc/Rc value. It doesn't keep the value alive; upgrade() returns None once the last strong owner is gone.",
+    "why": "Breaks reference cycles that would otherwise leak, and lets a map hold entries that clean themselves up: store Weak values and the map can drop the dead ones.",
+    "prereqs": ["arc"],
+    "link": { "label": "Rust Book 15.6", "url": "https://doc.rust-lang.org/book/ch15-06-reference-cycles.html" }
+  },
+  "mutex": {
+    "term": "Mutex<T>",
+    "aliases": ["Mutex", "Mutex<T>"],
+    "short": "A lock guarding interior data so only one holder mutates at a time. tokio's async Mutex yields the task while waiting instead of blocking the whole thread.",
+    "why": "Shared ownership alone still races on writes. The Mutex is what makes the shared mutation safe, and the compiler won't let you reach the data without taking the lock first.",
+    "prereqs": ["interior-mutability", "send-sync"],
+    "link": { "label": "Rust Book 16.3", "url": "https://doc.rust-lang.org/book/ch16-03-shared-state.html" }
+  },
+  "async-await": {
+    "term": "async / .await",
+    "aliases": [".await", "async"],
+    "short": "async fn returns a future that does nothing until awaited; .await drives it and yields control back to the runtime while waiting, so one thread can juggle many tasks.",
+    "why": "It's cooperative concurrency: awaiting a slow I/O call frees the thread to run other tasks instead of blocking, which is how a single process can supervise many servers at once.",
+    "prereqs": [],
+    "link": { "label": "Rust Book 17.1", "url": "https://doc.rust-lang.org/book/ch17-01-futures-and-syntax.html" }
+  },
+  "tokio-spawn": {
+    "term": "tokio::spawn",
+    "aliases": ["tokio::spawn"],
+    "short": "Hands a future to the tokio runtime to run concurrently, returning a JoinHandle. The task may run on any worker thread and may outlive the caller, so it must be 'static and Send.",
+    "why": "The go-to way to run work in the background. Its 'static + Send bounds are exactly why detached tasks reach for Arc<Mutex<T>> instead of borrowing the caller's state.",
+    "prereqs": ["async-await", "send-sync", "static-lifetime", "arc"],
+    "link": { "label": "tokio docs", "url": "https://docs.rs/tokio/latest/tokio/task/fn.spawn.html" }
+  },
+  "timeout": {
+    "term": "tokio::time::timeout",
+    "aliases": ["tokio::time::timeout"],
+    "short": "Wraps a future with a deadline; it resolves to Err once the duration elapses, cancelling the inner future.",
+    "why": "Bounds how long async work may take so a hung boot or a wedged health check turns into a clean, reportable failure instead of a task that waits forever.",
+    "prereqs": ["async-await", "result"],
+    "link": { "label": "tokio docs", "url": "https://docs.rs/tokio/latest/tokio/time/fn.timeout.html" }
+  },
+  "option": {
+    "term": "Option<T>",
+    "aliases": ["Option", "Option<T>", "Some", "None"],
+    "short": "An enum that is either Some(value) or None. Rust has no null; absence is a value you must handle, checked by the compiler.",
+    "why": "\"Might be missing\" becomes a case the type forces you to consider, so you can't accidentally use a value that isn't there. Serde fills a missing field with None for you.",
+    "prereqs": [],
+    "link": { "label": "Rust Book 6.1", "url": "https://doc.rust-lang.org/book/ch06-01-defining-an-enum.html#the-option-enum-and-its-advantages-over-null-values" }
+  },
+  "result": {
+    "term": "Result<T, E>",
+    "aliases": ["Result", "Result<T, E>", "Ok", "Err"],
+    "short": "An enum that is either Ok(value) or Err(error). Rust has no exceptions; a fallible operation returns its error as a value you must handle.",
+    "why": "Failure is in the type signature, so you can't ignore it by accident. How you handle the Err (surface it, default it, propagate it) becomes a deliberate choice at each call site.",
+    "prereqs": [],
+    "link": { "label": "Rust Book 9.2", "url": "https://doc.rust-lang.org/book/ch09-02-recoverable-errors-with-result.html" }
+  },
+  "question-mark": {
+    "term": "the ? operator",
+    "aliases": ["?"],
+    "short": "On a Result or Option, ? unwraps the Ok/Some value or early-returns the Err/None from the enclosing function. It replaces a match that would just propagate the error.",
+    "why": "Turns manual error-forwarding into one character, keeping the happy path readable while still handling every failure explicitly.",
+    "prereqs": ["result", "option"],
+    "link": { "label": "Rust Book 9.2", "url": "https://doc.rust-lang.org/book/ch09-02-recoverable-errors-with-result.html#a-shortcut-for-propagating-errors-the--operator" }
+  },
+  "combinators": {
+    "term": "combinators",
+    "aliases": [".ok()", "unwrap_or", "unwrap_or_else", "and_then", "as_deref"],
+    "short": "Methods on Option/Result that transform them without a match: map, and_then, ok, unwrap_or, unwrap_or_else, and friends. Each takes a closure or a default.",
+    "why": "They express \"do this if present, else that\" as a chain instead of a branch. The distinction matters: unwrap_or throws the error away, unwrap_or_else hands it to you first.",
+    "prereqs": ["option", "result", "closure"],
+    "link": { "label": "Option docs", "url": "https://doc.rust-lang.org/std/option/enum.Option.html" }
+  },
+  "match": {
+    "term": "match / if let",
+    "aliases": ["match", "if let"],
+    "short": "match compares a value against patterns and must cover every case; if let is the shorthand for when you only care about one pattern and ignore the rest.",
+    "why": "Exhaustive matching means adding a new enum variant makes the compiler point you at every place that must handle it, so \"forgot a case\" becomes a build error.",
+    "prereqs": ["option"],
+    "link": { "label": "Rust Book 6.2", "url": "https://doc.rust-lang.org/book/ch06-02-match.html" }
+  },
+  "closure": {
+    "term": "closure",
+    "aliases": ["closure"],
+    "short": "An anonymous function written with |args| body that can capture variables from its surrounding scope, by reference or (with move) by value.",
+    "why": "Closures are how you pass behavior around: a combinator's transform, a task's body, a Drop guard's cleanup. What they capture, and whether they move it, decides their lifetime.",
+    "prereqs": ["ownership"],
+    "link": { "label": "Rust Book 13.1", "url": "https://doc.rust-lang.org/book/ch13-01-closures.html" }
+  },
+  "iterator": {
+    "term": "iterator",
+    "aliases": ["Iterator", ".iter()", ".map()"],
+    "short": "A lazy sequence: .iter() and adapters like .map() build a pipeline that does no work until something drives it. Nothing is computed until you consume it.",
+    "why": "Laziness means you can chain transforms cheaply and only pay for what you actually take. The pipeline stays declarative; collect (or a for loop) is what makes it run.",
+    "prereqs": ["closure"],
+    "link": { "label": "Rust Book 13.2", "url": "https://doc.rust-lang.org/book/ch13-02-iterators.html" }
+  },
+  "collect": {
+    "term": "collect",
+    "aliases": [".collect()", "collect"],
+    "short": "Consumes an iterator and gathers its items into a collection (Vec, HashMap, String, ...). It's the driver that finally runs a lazy iterator pipeline.",
+    "why": "Turns one collection into another in a single expression, with the target type telling collect what to build. It's where a map/filter chain stops being lazy and produces a value.",
+    "prereqs": ["iterator"],
+    "link": { "label": "Iterator::collect", "url": "https://doc.rust-lang.org/std/iter/trait.Iterator.html#method.collect" }
+  },
+  "trait": {
+    "term": "trait",
+    "aliases": ["trait"],
+    "short": "A named set of methods a type can implement, like an interface. Code can then require \"any type that implements this trait\" rather than one concrete type.",
+    "why": "Traits are Rust's main tool for shared behavior and abstraction, and implementing a library's trait is how you plug your own type into that library's machinery.",
+    "prereqs": [],
+    "link": { "label": "Rust Book 10.2", "url": "https://doc.rust-lang.org/book/ch10-02-traits.html" }
+  },
+  "generics": {
+    "term": "generics",
+    "aliases": ["generic", "generics"],
+    "short": "Writing code over a type parameter (like T or S) instead of a concrete type, so one function or struct works for many types.",
+    "why": "Write the logic once and let the compiler specialize it per type. Combined with trait bounds, generics give you abstraction with no runtime cost.",
+    "prereqs": ["trait"],
+    "link": { "label": "Rust Book 10.1", "url": "https://doc.rust-lang.org/book/ch10-01-syntax.html" }
+  },
+  "trait-bound": {
+    "term": "trait bound",
+    "aliases": ["trait bound", "trait bounds"],
+    "short": "A constraint on a generic type, written like T: Display, saying \"T must implement this trait.\" It's what lets generic code actually call methods on T.",
+    "why": "The bound is the contract: it tells the compiler which methods are available on the type parameter, and tells callers which types they're allowed to pass.",
+    "prereqs": ["generics"],
+    "link": { "label": "Rust Book 10.2", "url": "https://doc.rust-lang.org/book/ch10-02-traits.html#traits-as-parameters" }
+  },
+  "static-dispatch": {
+    "term": "static dispatch",
+    "aliases": ["static dispatch"],
+    "short": "Resolving which concrete method to call at compile time. Generic code is monomorphized into a specialized copy per type, so calls are direct with no runtime lookup.",
+    "why": "It's abstraction for free: the generic loop over a stream type compiles down to the same machine code you'd have written by hand for each concrete type.",
+    "prereqs": ["generics", "monomorphization"],
+    "link": { "label": "Rust Book 17.2", "url": "https://doc.rust-lang.org/book/ch17-02-trait-objects.html#trait-objects-perform-dynamic-dispatch" }
+  },
+  "dynamic-dispatch": {
+    "term": "dynamic dispatch",
+    "aliases": ["dyn", "dynamic dispatch", "trait object"],
+    "short": "Resolving the method at runtime through a trait object (dyn Trait), which carries a pointer to the right implementation. One code path handles many types.",
+    "why": "Trades a tiny runtime indirection for flexibility: you can store different implementing types together or choose one at runtime, which generics can't do.",
+    "prereqs": ["trait"],
+    "link": { "label": "Rust Book 17.2", "url": "https://doc.rust-lang.org/book/ch17-02-trait-objects.html" }
+  },
+  "monomorphization": {
+    "term": "monomorphization",
+    "aliases": ["monomorphization", "monomorphized"],
+    "short": "The compiler's process of turning generic code into concrete code by stamping out a specialized copy for each type it's used with.",
+    "why": "It's why generics have zero runtime overhead: by the time the program runs, each generic use is just ordinary type-specific code. The cost is paid in compile time and binary size.",
+    "prereqs": ["generics"],
+    "link": { "label": "Rust Book 10.1", "url": "https://doc.rust-lang.org/book/ch10-01-syntax.html#performance-of-code-using-generics" }
+  },
+  "drop": {
+    "term": "Drop / RAII",
+    "aliases": ["Drop", "RAII"],
+    "short": "The Drop trait runs cleanup code automatically when a value goes out of scope. Tie a resource's release to a value's lifetime and you can't forget to free it.",
+    "why": "Files close, locks release, and guards fire without a manual step. The catch: a signal-killed process skips destructors, so external cleanup can't rely on Drop alone.",
+    "prereqs": ["ownership"],
+    "link": { "label": "Rust Book 15.3", "url": "https://doc.rust-lang.org/book/ch15-03-drop.html" }
+  },
+  "newtype": {
+    "term": "newtype pattern",
+    "aliases": ["newtype", "HeaderValue"],
+    "short": "Wrapping a value in a single-field struct to give it a distinct type, so a validated or domain-specific value can't be confused with a plain one.",
+    "why": "The wrapper is where you enforce an invariant once (a HeaderValue is a validated byte-string, not any String), and the type system carries that guarantee everywhere after.",
+    "prereqs": ["trait"],
+    "link": { "label": "Rust Book 19.3", "url": "https://doc.rust-lang.org/book/ch19-03-advanced-traits.html#using-the-newtype-pattern-to-implement-external-traits" }
+  },
+  "derive-macro": {
+    "term": "derive macro",
+    "aliases": ["derive", "#[derive(Deserialize)]", "#[derive(Serialize, Deserialize)]"],
+    "short": "A #[derive(...)] attribute that generates a trait implementation for your type at compile time, so you don't hand-write boilerplate impls.",
+    "why": "One line gives you the code for common traits (Debug, Clone, and serde's Serialize/Deserialize). You only hand-write the impl when the derived shape isn't exactly what you need.",
+    "prereqs": ["trait"],
+    "link": { "label": "Rust Book 19.5", "url": "https://doc.rust-lang.org/book/ch19-05-macros.html#how-to-write-a-custom-derive-macro" }
+  },
+  "serde": {
+    "term": "Serialize / Deserialize",
+    "aliases": ["Serialize", "Deserialize", "serde"],
+    "short": "serde's two traits for converting Rust values to and from formats like JSON or TOML. Usually derived; #[serde(...)] attributes tune field names, defaults, and shape.",
+    "why": "Deriving them on a dedicated DTO type pins your public wire format to a Rust type, so the contract lives in code and the compiler keeps the two in sync.",
+    "prereqs": ["derive-macro"],
+    "link": { "label": "serde.rs", "url": "https://serde.rs/derive.html" }
+  },
+  "unsafe-ffi": {
+    "term": "unsafe / FFI",
+    "aliases": ["unsafe", "FFI"],
+    "short": "unsafe marks code where you, not the compiler, uphold the safety rules, typically to call across a foreign function interface (FFI) into C or a system library.",
+    "why": "It's the escape hatch for things the borrow checker can't verify, like calling into the OS keychain. The unsafe block is a deliberate, auditable boundary, not a free-for-all.",
+    "prereqs": ["ownership"],
+    "link": { "label": "Rust Book 19.1", "url": "https://doc.rust-lang.org/book/ch19-01-unsafe-rust.html" }
+  },
+  "instant": {
+    "term": "Instant vs SystemTime",
+    "aliases": ["Instant", "SystemTime"],
+    "short": "Instant is a monotonic clock for measuring elapsed time; SystemTime is the wall clock that can jump backward when the OS adjusts it.",
+    "why": "For deadlines and timeouts you want Instant, because it never goes backward. Reach for SystemTime only when you need an actual calendar time.",
+    "prereqs": [],
+    "link": { "label": "std::time::Instant", "url": "https://doc.rust-lang.org/std/time/struct.Instant.html" }
+  },
+  "vec": {
+    "term": "Vec<T>",
+    "aliases": ["Vec", "Vec<T>"],
+    "short": "A growable, heap-allocated array of T. It owns its elements and frees them when it's dropped.",
+    "why": "The default owned collection. Building one with the vec![] macro or by collecting an iterator is the everyday way to hold a variable number of values.",
+    "prereqs": ["ownership"],
+    "link": { "label": "std::vec::Vec", "url": "https://doc.rust-lang.org/std/vec/struct.Vec.html" }
+  },
+  "hashmap": {
+    "term": "HashMap<K, V>",
+    "aliases": ["HashMap"],
+    "short": "A hash-table mapping owned keys to owned values, with average O(1) insert and lookup.",
+    "why": "The standard key-value store. It owns what you put in it, and methods like retain let you edit it in place without rebuilding it.",
+    "prereqs": ["ownership"],
+    "link": { "label": "std::collections::HashMap", "url": "https://doc.rust-lang.org/std/collections/struct.HashMap.html" }
+  },
+  "hashmap-retain": {
+    "term": "HashMap::retain",
+    "aliases": ["HashMap::retain", "retain"],
+    "short": "Keeps only the entries for which a closure returns true, removing the rest in one in-place pass over the map.",
+    "why": "The idiomatic way to garbage-collect a map (for example, dropping entries whose Weak value has expired) without allocating a new one or iterating twice.",
+    "prereqs": ["closure", "hashmap"],
+    "link": { "label": "HashMap::retain", "url": "https://doc.rust-lang.org/std/collections/struct.HashMap.html#method.retain" }
+  },
+  "str-vs-string": {
+    "term": "&str vs String",
+    "aliases": ["String", "&str"],
+    "short": "String is an owned, growable UTF-8 buffer; &str is a borrowed view into one (or into a string literal). String owns, &str borrows.",
+    "why": "The distinction is ownership again: take &str in function arguments to borrow without allocating, and return String when the caller needs to own the result.",
+    "prereqs": ["ownership", "borrowing"],
+    "link": { "label": "Rust Book 8.2", "url": "https://doc.rust-lang.org/book/ch08-02-strings.html" }
+  },
+  "split-once": {
+    "term": "str::split_once",
+    "aliases": ["split_once", "str::split_once"],
+    "short": "Cuts a string at the first occurrence of a delimiter into two borrowed &str slices, returning Option so \"delimiter not found\" is a None case, not a panic.",
+    "why": "Exactly right for parsing key=value or label.name: you get both halves as borrows of the original, and the Option makes the missing-delimiter case something you handle, not a bug.",
+    "prereqs": ["option", "str-vs-string"],
+    "link": { "label": "str::split_once", "url": "https://doc.rust-lang.org/std/primitive.str.html#method.split_once" }
+  },
+  "format-macro": {
+    "term": "format!",
+    "aliases": ["format!"],
+    "short": "Builds a new String from a template, filling {} placeholders with values. {name} captures a variable of that name directly from scope.",
+    "why": "The everyday way to assemble strings. Its inline-capture form keeps templated text readable, and it's how derived data like a URL or an env value gets composed.",
+    "prereqs": ["str-vs-string"],
+    "link": { "label": "std::format!", "url": "https://doc.rust-lang.org/std/macro.format.html" }
+  },
+  "build-rs": {
+    "term": "build.rs",
+    "aliases": ["build.rs"],
+    "short": "A build script: Rust code the compiler runs before compiling your crate. Printing cargo:rustc-env=KEY=VALUE injects a value the crate can read at compile time.",
+    "why": "It's how compile-time facts (a git SHA, a build timestamp) get baked into the binary, so the program can report exactly which build it is without any runtime lookup.",
+    "prereqs": [],
+    "link": { "label": "Cargo Book", "url": "https://doc.rust-lang.org/cargo/reference/build-scripts.html" }
+  },
+  "env-macro": {
+    "term": "env! / option_env!",
+    "aliases": ["env!", "option_env!"],
+    "short": "Compile-time macros that read an environment variable and bake it into the binary as a &'static str. env! fails the build if it's unset; option_env! yields an Option instead.",
+    "why": "Paired with build.rs, they turn build-time environment values into constants compiled into the program, so there's nothing to read or fail at runtime.",
+    "prereqs": ["build-rs", "static-lifetime"],
+    "link": { "label": "std::env!", "url": "https://doc.rust-lang.org/std/macro.env.html" }
+  },
+  "include-str": {
+    "term": "include_str!",
+    "aliases": ["include_str!"],
+    "short": "A macro that reads a file at compile time and embeds its contents into the binary as a &'static str.",
+    "why": "Bakes a whole document (a template, a help text) into the executable, so it ships as one self-contained file with nothing to load from disk at runtime.",
+    "prereqs": ["static-lifetime"],
+    "link": { "label": "std::include_str!", "url": "https://doc.rust-lang.org/std/macro.include_str.html" }
+  },
+  "command": {
+    "term": "Command",
+    "aliases": ["Command"],
+    "short": "The builder for spawning a child process: chain .env(), .arg(), .stdout() to configure it, then .spawn(). It inherits the parent's environment by default.",
+    "why": "A textbook builder pattern, and the surface where a supervisor injects a child's port and environment before starting it, one .env() layer at a time.",
+    "prereqs": [],
+    "link": { "label": "std::process::Command", "url": "https://doc.rust-lang.org/std/process/struct.Command.html" }
+  }
+}

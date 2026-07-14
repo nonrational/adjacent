@@ -35,7 +35,10 @@ release:
   git tag "$tag"
   git push origin "$tag"
 
-serve:
+build-lessons:
+  node ent/lessons/build.mjs
+
+serve: build-lessons
   npx live-server --port=8081
 
 # Rebuild + re-create the local CA so the macOS keychain ACL trusts the new binary.

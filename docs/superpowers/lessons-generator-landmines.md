@@ -1,0 +1,74 @@
+# Landmines: building the lessons generator (and the skill that extracts it)
+
+Hard-won gotchas from building `ent/lessons/build.mjs` and its interactive site. Read
+before touching the generator or extracting the `lessons-from-prs` / site-build skills
+(see `docs/superpowers/specs/2026-07-12-lessons-from-prs-skill-design.md`). Each one cost
+a real debugging loop; none is obvious from the code alone.
+
+## 1. The `\u0000` → NUL-byte trap (the expensive one)
+
+Writing a literal `\u0000` escape in **any Write/Edit tool content** JSON-decodes to a
+real NUL (`0x00`) byte on disk. Git then treats the file as **binary**: no line diff, no
+`git blame`, `grep -n` reports "binary file matches" instead of line numbers. On a shared
+file that every task builds on, this compounds fast.
+
+- The engine deliberately builds its placeholder sentinel with `String.fromCharCode(0)`
+  at runtime, so the **source stays pure ASCII** (commit `026cdfc`). Never reintroduce a
+  literal `\u0000` into `build.mjs` via a tool.
+- After any edit to `build.mjs`, verify: `tr -cd '\000' < ent/lessons/build.mjs | wc -c`
+  must print `0`, and `file ent/lessons/build.mjs` must say "text", not "data".
+- To emit bytes a tool keeps mangling, generate the file with a Python script using
+  `chr(...)` and raw strings, then verify and install. Several fixes this session landed
+  that way because the edit tools could not represent the bytes directly.
+
+## 2. Test against REAL repo content, not just synthetic fixtures
+
+The plan's hand-written fixtures passed while real corpus data broke. Every parser/
+renderer needs a real-content check, not only unit fixtures:
+
+- **Wrapped list items** — bullets/numbered items that wrap across source lines were
+  truncated, leaking the remainder into a stray `<p>` (found only against real lessons;
+  commit `19160b5`). ~half the lessons wrap.
+- **GFM table-cell pipe escapes** — a table cell escapes a literal pipe as `\|`; the raw
+  backslashes leaked into a rendered takeaway (`.unwrap_or_else(\|err\|)`; commit
+  `2b9e314`).
+- **Real header formats** — em-dash titles and a Unicode minus (`−`, U+2212) in the
+  `+A/−D` delta; synthetic fixtures used ASCII. `parseLesson` was verified against all 31
+  real lessons before it was trusted.
+
+Lesson: for any new repo the skill targets, run the renderer/parser over that repo's
+actual lessons and eyeball the output before believing green unit tests.
+
+## 3. Browser verification can't be skipped, and Node tests can't replace it
+
+The drawer's real behavior is browser-side. A Node presence-test (assert the emitted JS
+contains a click handler) cannot catch layout, z-index, or pointer-events bugs.
+
+- The Chrome extension was offline one session, so the drawer went unverified by
+  automation — and a real bug shipped: the **closed `.drawer-scrim`** (`opacity: 0` but
+  `position: fixed; inset: 0; z-index: 10`) swallowed every click, because `opacity: 0`
+  does **not** disable pointer events. Fixed with `pointer-events: none` until `.open`
+  (commit `3ebd523`). A human live-click caught it.
+- Always include an explicit manual step: serve the site, click a term, walk a prereq
+  chip, press Esc. `python3 -m http.server <port>` from the repo root works (avoid 8080 —
+  that's the `adj` daemon). If the browser automation extension is connected, drive it;
+  otherwise say so and ask for a human pass.
+
+## 4. Escaping context: text vs attribute
+
+HTML-emitting helpers must distinguish text-node escaping (`& < >`) from attribute-value
+escaping (adds `"`). The browser-side drawer `esc()` initially escaped only `& < >` but
+filled double-quoted attributes (`data-term="…"`, `href="…"`); a `"` in a glossary key or
+URL would break out. It now also escapes `"` (commit `fff4e41`). The server-side pair is
+`escapeHtml` (text) vs `escapeAttr` (attributes) — mirror that split anywhere you build
+markup as strings.
+
+## 5. Portability scrub is load-bearing (for the extracted skill)
+
+`~/.claude` is a **public** repo, so any skill extracted from this work is a published
+artifact. Per `~/.dotfiles/.claude/rules/skill-authoring.md`, no project-specific
+identifier may survive into the skill: scrub `adjacent`, `adj.ac`, `nonrational`,
+`d4a574`, `ent/lessons`, and Rust-as-the-only-language into a neutral invented example.
+Gate before done: `grep -rniE '<project nouns>' <skill-dir>` returns only neutral
+examples. The engine/theme seam exists so all repo-specific values live in one `THEME`
+object, not scattered through the engine.
