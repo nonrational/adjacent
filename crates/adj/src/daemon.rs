@@ -8,6 +8,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
+use crate::dns;
 use crate::paths;
 use crate::proxy;
 use crate::readiness::{wait_ready as readiness_wait, ReadinessError};
@@ -94,6 +95,15 @@ pub async fn run() -> Result<()> {
             }
         });
     }
+
+    // Local DNS for *.adj.ac. Resolution only takes this path once the user installs the
+    // /etc/resolver hook (`adj install-resolver`), but the server always runs so installing
+    // the hook needs no daemon restart. Best-effort: a taken port degrades to public DNS.
+    tokio::spawn(async move {
+        if let Err(err) = dns::run().await {
+            tracing::error!("dns listener exited: {err}");
+        }
+    });
 
     // Idle scanner: periodically stop apps whose last-routed-request is older than their
     // configured idle_timeout. Chose a scan loop over per-app timers — no per-app timer state
